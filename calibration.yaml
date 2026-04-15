@@ -1,0 +1,20 @@
+# calibration.yaml
+
+# Base path to your data folder
+path: C:/Users/adjip/Documents/python/ASO-IPM/src/data
+
+# Point both train and val to your calibration images folder
+train: calibration_int8
+val: calibration_int8
+
+# YOLOv8n standard COCO classes (first 8 to cover your target classes)
+# Your code uses TARGET_CLASSES = {0, 2, 3, 5, 7}
+names:
+  0: person
+  1: bicycle
+  2: car
+  3: motorcycle
+  4: airplane
+  5: bus
+  6: train
+  7: truck

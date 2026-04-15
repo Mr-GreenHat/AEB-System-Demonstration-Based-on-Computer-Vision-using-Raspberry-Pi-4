@@ -1,0 +1,15 @@
+# Problems and Solutions
+
+| Problem | Solution |
+|---------|----------|
+| Hardcoded camera intrinsics path may not work on other systems | Use relative paths or environment variables for configuration |
+| Camera index hardcoded to 1 | Add configuration option for camera index selection |
+| Unusual pitch angle of 90 degrees | Verify and adjust camera mounting angle based on actual setup |
+| No error handling for camera capture failure | Add try-except blocks around camera operations and provide fallback |
+| CSV saving disabled by default | Enable CSV saving by default or add command-line argument to control it |
+| Potential division by zero in coordinate transformations | Add checks for zero denominators and handle edge cases |
+| No validation of IPM parameters | Add parameter validation at initialization |
+| Memory usage for large images not optimized | Consider resizing images or using streaming for large datasets |
+| YOLO model loading may fail silently | Add proper error handling and logging for model loading |
+| No frame rate control or performance monitoring | Add FPS calculation and display for performance monitoring |
+| Hardcoded image dimensions may not match actual camera | Add dynamic detection of camera resolution |
