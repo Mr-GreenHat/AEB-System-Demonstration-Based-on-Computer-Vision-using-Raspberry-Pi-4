@@ -24,7 +24,7 @@ CONFIG = {
     "names": r"C:\Users\adjip\Documents\python\ASO-IPM\src\coco.names",
 }
 
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 FRAME_W = 640
 FRAME_H = 480
 YOLO_INPUT_SIZE = 320
@@ -521,7 +521,7 @@ def main(yield_every_frame=False):
         "f_y": float(mtx[1, 1]),
         "u_x": float(mtx[0, 2]),
         "u_y": float(mtx[1, 2]),
-        "camera_height": 240.0,
+        "camera_height": 750.0,
         "pitch": 90.0,
         "yaw": 0.0,
     })
