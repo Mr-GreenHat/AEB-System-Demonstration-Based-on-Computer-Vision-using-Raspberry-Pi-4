@@ -21,7 +21,7 @@ CONFIG = {
 
 camera_intrinsics_path = "/home/adji/ttc_project/calibration/camera_intrinsics640x480.npz"
 
-CAMERA_INDEX = 0
+CAMERA_INDEX = 1
 FRAME_W = 640
 FRAME_H = 480
 YOLO_INPUT_SIZE = 320

@@ -4,11 +4,68 @@ import time
 import math
 import matplotlib.pyplot as plt
 
+from PIL import Image, ImageDraw, ImageFont
+
+import board
+import digitalio
+import adafruit_rgb_display.ili9341 as ili9341
+
 from ego_sim import EgoVehicle
 from webcam_distance_test import main
 
+# ============================================================
+# TFT CONFIG
+# ============================================================
+# Wiring assumption:
+#   TFT SCK  -> GPIO11 / SCLK
+#   TFT MOSI -> GPIO10 / MOSI
+#   TFT MISO -> GPIO9  / MISO (usually unused by the display)
+#   TFT CS   -> GPIO8  / CE0
+#   TFT DC   -> GPIO18
+#   TFT RST  -> GPIO23
+#
+# If your board wiring is different, change these pins accordingly.
+DC_PIN = board.D18
+RST_PIN = board.D23
+CS_PIN = board.CE0
+
+TFT_ROTATION = 0   # try 90 or 270 if the screen is sideways
+SPI_BAUDRATE = 24000000
+
+spi = board.SPI()
+while not spi.try_lock():
+    pass
+spi.configure(baudrate=SPI_BAUDRATE)
+spi.unlock()
+
+cs = digitalio.DigitalInOut(CS_PIN)
+dc = digitalio.DigitalInOut(DC_PIN)
+rst = digitalio.DigitalInOut(RST_PIN)
+
+disp = ili9341.ILI9341(
+    spi,
+    cs=cs,
+    dc=dc,
+    rst=rst,
+    rotation=TFT_ROTATION,
+    baudrate=SPI_BAUDRATE,
+)
+
+TFT_WIDTH = disp.width
+TFT_HEIGHT = disp.height
+
+# ============================================================
+# DISPLAY OPTIONS
+# ============================================================
+UPDATE_TFT_EVERY_N_FRAMES = 5
+SHOW_DESKTOP_CAMERA = True
+SHOW_DESKTOP_PLOTS = True
+
+# ============================================================
+# Timing / debug
+# ============================================================
 DEBUG_TIMING = True
-PRINT_EVERY_N_FRAMES = 1   # set to 30 later if the terminal spam slows everything down
+PRINT_EVERY_N_FRAMES = 1
 
 frame_counter = 0
 
@@ -28,11 +85,6 @@ def print_timing(label: str, timings: dict):
 SCALE = 10
 WORLD_WIDTH = 1000
 WORLD_HEIGHT = 260
-
-ROBOT_Y = WORLD_HEIGHT // 2
-OBJECT_Y = WORLD_HEIGHT // 2
-BOX_W = 40
-BOX_H = 40
 
 MIN_VALID_DISTANCE = 0.10
 
@@ -58,6 +110,36 @@ STOP_EPS = 0.01
 USE_MANUAL_SPEED = True
 MANUAL_SPEED_STEP = 0.10
 MAX_DEMO_SPEED = 5.0
+
+# ============================================================
+# Fonts
+# ============================================================
+def load_font(size: int, bold: bool = False):
+    candidates = []
+    if bold:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        ])
+    else:
+        candidates.extend([
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        ])
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            pass
+
+    return ImageFont.load_default()
+
+FONT_STATE = load_font(26, bold=True)
+FONT_LABEL = load_font(14, bold=True)
+FONT_VALUE = load_font(28, bold=True)
+FONT_SMALL = load_font(12, bold=False)
+FONT_MED = load_font(16, bold=True)
 
 # ============================================================
 # Helpers
@@ -86,21 +168,121 @@ def ttc_status(ttc: float) -> str:
         return "PARTIAL"
     return "EMERGENCY"
 
+def state_color(state: str):
+    if state in ("SAFE", "RUN"):
+        return (20, 130, 40)
+    if state == "FCW":
+        return (190, 160, 0)
+    if state == "PARTIAL":
+        return (190, 110, 0)
+    if state == "EMERGENCY":
+        return (180, 0, 0)
+    if state == "STOP":
+        return (0, 140, 70)
+    if state == "CRASH":
+        return (180, 0, 0)
+    return (60, 60, 60)
+
+def draw_centered_text(draw, box, text, font, fill):
+    x0, y0, x1, y1 = box
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = x0 + (x1 - x0 - tw) / 2
+    y = y0 + (y1 - y0 - th) / 2 - 1
+    draw.text((x, y), text, font=font, fill=fill)
+
+def draw_metric_card(draw, box, title, value, unit, accent, value_font=FONT_VALUE):
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=12, outline=accent, width=2, fill=(18, 18, 18))
+    draw.text((x0 + 10, y0 + 8), title, font=FONT_LABEL, fill=accent)
+
+    value_text = f"{value}"
+    draw.text((x0 + 10, y0 + 24), value_text, font=value_font, fill=(255, 255, 255))
+
+    if unit:
+        bbox = draw.textbbox((0, 0), value_text, font=value_font)
+        vw = bbox[2] - bbox[0]
+        draw.text((x0 + 10 + vw + 6, y0 + 42), unit, font=FONT_SMALL, fill=(200, 200, 200))
+
+def draw_bar(draw, box, title, level, on_text, accent, bg_fill=(40, 40, 40)):
+    x0, y0, x1, y1 = box
+    draw.rounded_rectangle(box, radius=12, outline=accent, width=2, fill=(18, 18, 18))
+    draw.text((x0 + 10, y0 + 6), title, font=FONT_LABEL, fill=accent)
+
+    bar_x0 = x0 + 10
+    bar_y0 = y0 + 32
+    bar_x1 = x1 - 10
+    bar_y1 = y0 + 56
+
+    draw.rounded_rectangle((bar_x0, bar_y0, bar_x1, bar_y1), radius=8, fill=bg_fill)
+
+    level = float(np.clip(level, 0.0, 1.0))
+    fill_x1 = bar_x0 + int((bar_x1 - bar_x0) * level)
+    if fill_x1 > bar_x0:
+        draw.rounded_rectangle((bar_x0, bar_y0, fill_x1, bar_y1), radius=8, fill=accent)
+
+    draw.text((x0 + 10, y0 + 60), on_text, font=FONT_SMALL, fill=(230, 230, 230))
+
+def render_dashboard(
+    state: str,
+    speed_mps: float,
+    virtual_distance_m: float | None,
+    ttc_value: float,
+    brake_level: float,
+    brake_on: bool,
+    warning_on: bool,
+    locked_initial_distance: float | None,
+    live_distance: float | None,
+    manual_speed_mps: float,
+):
+    img = Image.new("RGB", (TFT_WIDTH, TFT_HEIGHT), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    banner_color = state_color(state)
+    draw.rounded_rectangle((8, 8, TFT_WIDTH - 8, 58), radius=14, fill=banner_color)
+
+    draw_centered_text(draw, (8, 8, TFT_WIDTH - 8, 38), state, FONT_STATE, (255, 255, 255))
+    mode_text = f"Brake {'ON' if brake_on else 'OFF'}  |  Warning {'ON' if warning_on else 'OFF'}"
+    draw_centered_text(draw, (8, 34, TFT_WIDTH - 8, 58), mode_text, FONT_SMALL, (245, 245, 245))
+
+    card_w = TFT_WIDTH - 16
+    card_x = 8
+
+    speed_box = (card_x, 68, card_x + card_w, 125)
+    ttc_box = (card_x, 132, card_x + card_w, 189)
+    dist_box = (card_x, 196, card_x + card_w, 253)
+
+    speed_val = f"{speed_mps:0.2f}"
+    ttc_val = "inf" if not math.isfinite(ttc_value) else f"{ttc_value:0.2f}"
+    dist_val = "n/a" if virtual_distance_m is None else f"{virtual_distance_m:0.2f}"
+
+    draw_metric_card(draw, speed_box, "SPEED", speed_val, "m/s", (80, 170, 255))
+    draw_metric_card(draw, ttc_box, "TTC", ttc_val, "s", state_color(ttc_status(ttc_value)))
+    draw_metric_card(draw, dist_box, "DISTANCE", dist_val, "m", (180, 180, 180))
+
+    bar_box = (8, 260, TFT_WIDTH - 8, 300)
+    brake_text = f"{brake_level * 100:0.0f}%"
+    draw_bar(draw, bar_box, "BRAKE", brake_level, f"LEVEL {brake_text}", (220, 60, 60))
+
+    footer_y = 303
+    footer_left = f"d0 {locked_initial_distance:0.2f}m" if locked_initial_distance is not None else "d0 n/a"
+    footer_mid = f"live {live_distance:0.2f}m" if live_distance is not None else "live n/a"
+    footer_right = f"man {manual_speed_mps:0.2f}"
+
+    draw.text((8, footer_y), footer_left, font=FONT_SMALL, fill=(200, 200, 200))
+    draw.text((84, footer_y), footer_mid, font=FONT_SMALL, fill=(200, 200, 200))
+    draw.text((174, footer_y), footer_right, font=FONT_SMALL, fill=(200, 200, 200))
+
+    return img
+
+def display_on_tft(img: Image.Image):
+    disp.image(img)
+
 def set_warning_output(enabled: bool):
-    """
-    Replace this with buzzer / LED output for FCW.
-    """
     pass
 
 def set_brake_output(level: float):
-    """
-    Replace this with GPIO / relay / serial output for the real brake actuator.
-
-    level:
-        0.0 = no brake
-        0.3 = partial brake
-        1.0 = full brake
-    """
     level = float(np.clip(level, 0.0, 1.0))
     pass
 
@@ -117,9 +299,6 @@ def reset_ego(ego: EgoVehicle):
     ego.set_speed(0.0)
 
 def get_closest_live_distance(tracks) -> float | None:
-    """
-    Used ONLY during INIT to lock the starting distance.
-    """
     closest = None
     for _, tr in tracks.items():
         depth = getattr(tr, "smoothed_depth", None)
@@ -148,7 +327,7 @@ def first_state_idx(state_log, target):
     return None
 
 def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_req_log, state_log):
-    if not time_log:
+    if not time_log or not SHOW_DESKTOP_PLOTS:
         return
 
     fcw_idx = first_state_idx(state_log, "FCW")
@@ -157,7 +336,6 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     stop_idx = first_state_idx(state_log, "STOP")
     crash_idx = first_state_idx(state_log, "CRASH")
 
-    # 1) Distance vs Time
     plt.figure(figsize=(9, 4))
     plt.plot(time_log, distance_log, label="Remaining distance")
     if fcw_idx is not None:
@@ -176,7 +354,6 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     plt.grid(True)
     plt.legend()
 
-    # 2) Speed vs Time
     plt.figure(figsize=(9, 4))
     plt.plot(time_log, speed_log, label="Speed")
     if fcw_idx is not None:
@@ -191,9 +368,7 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     plt.grid(True)
     plt.legend()
 
-    # 3) TTC vs Time with clean bands
     plt.figure(figsize=(9, 4))
-
     ttc_arr = np.array(ttc_log, dtype=float)
     finite_ttc = ttc_arr[np.isfinite(ttc_arr)]
     if finite_ttc.size > 0:
@@ -201,18 +376,15 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     else:
         y_top = SAFE_TTC + 1.0
 
-    # background zones
     plt.axhspan(0, PARTIAL_TTC, color="red", alpha=0.20, label="Emergency")
     plt.axhspan(PARTIAL_TTC, FCW_TTC, color="orange", alpha=0.20, label="Partial")
     plt.axhspan(FCW_TTC, SAFE_TTC, color="yellow", alpha=0.20, label="FCW")
     plt.axhspan(SAFE_TTC, y_top, color="green", alpha=0.12, label="Safe")
 
-    # threshold lines
     plt.axhline(SAFE_TTC, linestyle="--", color="blue")
     plt.axhline(FCW_TTC, linestyle="--", color="blue")
     plt.axhline(PARTIAL_TTC, linestyle="--", color="blue")
 
-    # TTC curve
     plt.plot(time_log, ttc_log, color="black", label="TTC")
 
     if fcw_idx is not None:
@@ -227,13 +399,11 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     plt.title("TTC vs Time")
     plt.grid(True)
     plt.legend()
-
     plt.tight_layout()
     plt.show()
 
 # ============================================================
 # Demo speed fallback
-# Replace this with encoder / serial input later.
 # ============================================================
 manual_speed_mps = 0.0
 
@@ -261,12 +431,10 @@ warning_on = False
 last_live_distance = None
 plots_shown = False
 
-# Brake event freeze values
 brake_trigger_speed = 0.0
 brake_required_stop_distance = 0.0
 brake_trigger_mode = None
 
-# Logs
 time_log = []
 distance_log = []
 speed_log = []
@@ -276,13 +444,9 @@ stop_req_log = []
 state_log = []
 sim_time = 0.0
 
-# Current moving speed of the virtual car
 current_speed = 0.0
-
-# Current brake actuation level
 brake_level = 0.0
 
-# Current TTC
 ttc = math.inf
 status = "SAFE"
 
@@ -294,23 +458,17 @@ for frame, tracks in main(yield_every_frame=True):
     loop_t0 = time.perf_counter()
     timings = {}
 
-    # --------------------------------------------------------
-    # Timing: dt calculation
-    # --------------------------------------------------------
+    # dt
     t0 = time.perf_counter()
     now = time.perf_counter()
-    if last_frame_time is None:
-        dt = DT
-    else:
-        dt = DT
+    dt = DT
     last_frame_time = now
     timings["dt"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
     # Keyboard controls
-    # --------------------------------------------------------
     t0 = time.perf_counter()
     key = cv2.waitKey(1) & 0xFF
+
     if key == ord("q"):
         timings["key"] = time.perf_counter() - t0
         print_timing("EXIT", timings)
@@ -378,79 +536,57 @@ for frame, tracks in main(yield_every_frame=True):
             manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
         elif key == ord(" "):
             manual_speed_mps = 0.0
+
     timings["key"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
-    # Draw camera preview
-    # --------------------------------------------------------
+    # Optional camera preview
     t0 = time.perf_counter()
-    cv2.imshow("CV + Tracking", frame)
+    if SHOW_DESKTOP_CAMERA:
+        cv2.imshow("CV + Tracking", frame)
     timings["camera_imshow"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
     # Get live distance
-    # --------------------------------------------------------
     t0 = time.perf_counter()
     live_distance = get_closest_live_distance(tracks)
     last_live_distance = live_distance if live_distance is not None else last_live_distance
     timings["live_distance"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
+    # ========================================================
     # IDLE
-    # --------------------------------------------------------
+    # ========================================================
     if state == "IDLE":
         t0 = time.perf_counter()
 
-        world = np.zeros((WORLD_HEIGHT, WORLD_WIDTH, 3), dtype=np.uint8)
+        dashboard = render_dashboard(
+            state=state,
+            speed_mps=current_speed,
+            virtual_distance_m=virtual_distance,
+            ttc_value=ttc,
+            brake_level=brake_level,
+            brake_on=brake_on,
+            warning_on=warning_on,
+            locked_initial_distance=locked_initial_distance,
+            live_distance=last_live_distance,
+            manual_speed_mps=manual_speed_mps,
+        )
 
-        cv2.putText(world, "IDLE - press I to initialize", (20, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-        cv2.putText(world, f"Manual speed: {manual_speed_mps:.2f} m/s", (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-        cv2.putText(world, "W/S adjust speed, SPACE zeroes it", (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+        if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+            display_on_tft(dashboard)
 
-        if last_live_distance is not None:
-            cv2.putText(world, f"Live camera distance: {last_live_distance:.2f} m", (20, 140),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
-        else:
-            cv2.putText(world, "Live camera distance: none", (20, 140),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
-
-        cv2.imshow("2D World", world)
         timings["idle_render"] = time.perf_counter() - t0
-
         timings["loop_total"] = time.perf_counter() - loop_t0
         if frame_counter % PRINT_EVERY_N_FRAMES == 0:
             print_timing("IDLE", timings)
         continue
 
-    # --------------------------------------------------------
+    # ========================================================
     # INIT
-    # --------------------------------------------------------
+    # ========================================================
     if state == "INIT":
         t0 = time.perf_counter()
 
-        world = np.zeros((WORLD_HEIGHT, WORLD_WIDTH, 3), dtype=np.uint8)
-
         if live_distance is not None:
             init_samples.append(live_distance)
-
-        elapsed = now - init_start_time if init_start_time is not None else 0.0
-
-        cv2.putText(world, "INIT - locking initial distance", (20, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-        cv2.putText(world, f"Samples: {len(init_samples)}/{INIT_REQUIRED_SAMPLES}", (20, 70),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-        cv2.putText(world, f"Elapsed: {elapsed:.2f} s", (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-
-        if live_distance is not None:
-            cv2.putText(world, f"Current live distance: {live_distance:.2f} m", (20, 140),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
-        else:
-            cv2.putText(world, "Current live distance: waiting for detection", (20, 140),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
 
         if (len(init_samples) >= INIT_REQUIRED_SAMPLES) or (
             init_start_time is not None and (now - init_start_time) >= INIT_MAX_WAIT_SEC and len(init_samples) > 0
@@ -468,22 +604,35 @@ for frame, tracks in main(yield_every_frame=True):
             ego.set_speed(0.0)
             state = "RUN"
 
-        cv2.imshow("2D World", world)
-        timings["init_render"] = time.perf_counter() - t0
+        dashboard = render_dashboard(
+            state="INIT",
+            speed_mps=current_speed,
+            virtual_distance_m=virtual_distance,
+            ttc_value=ttc,
+            brake_level=brake_level,
+            brake_on=brake_on,
+            warning_on=warning_on,
+            locked_initial_distance=locked_initial_distance,
+            live_distance=live_distance,
+            manual_speed_mps=manual_speed_mps,
+        )
 
+        if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+            display_on_tft(dashboard)
+
+        timings["init_render"] = time.perf_counter() - t0
         timings["loop_total"] = time.perf_counter() - loop_t0
         if frame_counter % PRINT_EVERY_N_FRAMES == 0:
             print_timing("INIT", timings)
         continue
 
-    # --------------------------------------------------------
+    # ========================================================
     # RUN / FCW / PARTIAL / EMERGENCY / STOP / CRASH
-    # --------------------------------------------------------
+    # ========================================================
     t0 = time.perf_counter()
     wheel_speed_mps = read_wheel_speed_mps()
     timings["read_speed"] = time.perf_counter() - t0
 
-    # Compute current distance and TTC first
     t0 = time.perf_counter()
     if locked_initial_distance is not None:
         virtual_distance = max(locked_initial_distance - robot_z, 0.0)
@@ -528,7 +677,7 @@ for frame, tracks in main(yield_every_frame=True):
             set_warning_output(True)
             set_brake_output(brake_level)
 
-        else:  # EMERGENCY
+        else:
             state = "EMERGENCY"
             warning_on = True
             brake_on = True
@@ -599,7 +748,7 @@ for frame, tracks in main(yield_every_frame=True):
             ego.set_speed(0.0)
             brake_on = True
             brake_level = 1.0
-            set_brake_output(brake_level)
+            set_brake_output(0.0)
 
     elif state == "STOP":
         current_speed = 0.0
@@ -623,9 +772,9 @@ for frame, tracks in main(yield_every_frame=True):
         virtual_distance = 0.0
         ttc = math.inf
         status = "CRASH_RISK"
+
     timings["logic"] = time.perf_counter() - t0
 
-    # Ensure values exist for display/logging
     t0 = time.perf_counter()
     if state not in ("RUN", "FCW", "PARTIAL", "EMERGENCY"):
         if not math.isfinite(ttc):
@@ -634,11 +783,9 @@ for frame, tracks in main(yield_every_frame=True):
             virtual_distance = 0.0
     timings["sanity"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
     # Logs
-    # --------------------------------------------------------
     t0 = time.perf_counter()
-    sim_time += dt
+    sim_time += DT
     time_log.append(sim_time)
     distance_log.append(virtual_distance if virtual_distance is not None else 0.0)
     speed_log.append(current_speed)
@@ -653,92 +800,27 @@ for frame, tracks in main(yield_every_frame=True):
     state_log.append(state)
     timings["logging"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
-    # Visualization
-    # --------------------------------------------------------
+    # TFT dashboard render
     t0 = time.perf_counter()
-    world = np.zeros((WORLD_HEIGHT, WORLD_WIDTH, 3), dtype=np.uint8)
+    dashboard = render_dashboard(
+        state=state,
+        speed_mps=current_speed,
+        virtual_distance_m=virtual_distance,
+        ttc_value=ttc,
+        brake_level=brake_level,
+        brake_on=brake_on,
+        warning_on=warning_on,
+        locked_initial_distance=locked_initial_distance,
+        live_distance=live_distance,
+        manual_speed_mps=manual_speed_mps,
+    )
 
-    cv2.putText(world, f"STATE: {state}", (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+        display_on_tft(dashboard)
 
-    cv2.putText(world, f"Speed: {current_speed:.2f} m/s", (20, 65),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-    if locked_initial_distance is not None:
-        cv2.putText(world, f"Initial distance d0: {locked_initial_distance:.2f} m", (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-    dist_text = f"{virtual_distance:.2f} m" if virtual_distance is not None else "n/a"
-    ttc_text = f"{ttc:.2f} s" if math.isfinite(ttc) else "inf"
-
-    cv2.putText(world, f"Virtual distance: {dist_text}", (20, 135),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-    if state in ("PARTIAL", "EMERGENCY"):
-        req_text = f"{brake_required_stop_distance:.2f} m"
-    else:
-        req_text = "n/a"
-
-    cv2.putText(world, f"TTC: {ttc_text}   Stop dist: {req_text}", (20, 170),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
-
-    cv2.putText(world, f"Brake: {'ON' if brake_on else 'OFF'}   Warning: {'ON' if warning_on else 'OFF'}",
-                (20, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 0), 2)
-
-    cv2.putText(world, f"Brake level: {brake_level:.2f}   Mode: {status}",
-                (20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
-
-    span_m = max(locked_initial_distance if locked_initial_distance else 5.0, 5.0)
-    display_span_px = WORLD_WIDTH - 140
-    left_x = 60
-
-    robot_x = int(left_x + min(max((robot_z / span_m) * display_span_px, 0.0), display_span_px))
-    if locked_initial_distance is not None:
-        object_x = int(left_x + min(max((locked_initial_distance / span_m) * display_span_px, 0.0), display_span_px))
-    else:
-        object_x = WORLD_WIDTH - 80
-
-    cv2.rectangle(world,
-                  (robot_x, ROBOT_Y - BOX_H // 2),
-                  (robot_x + BOX_W, ROBOT_Y + BOX_H // 2),
-                  (0, 255, 0) if state != "CRASH" else (0, 0, 255),
-                  -1)
-
-    cv2.rectangle(world,
-                  (object_x, OBJECT_Y - BOX_H // 2),
-                  (object_x + BOX_W, OBJECT_Y + BOX_H // 2),
-                  (0, 0, 255),
-                  -1)
-
-    cv2.line(world,
-             (robot_x + BOX_W, ROBOT_Y),
-             (object_x, OBJECT_Y),
-             (255, 255, 255),
-             2)
-
-    if state == "CRASH":
-        cv2.putText(world, "COLLISION OCCURRED", (20, 235),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-    elif state == "STOP":
-        cv2.putText(world, "STOPPED SAFELY", (20, 235),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
-    elif state == "PARTIAL":
-        cv2.putText(world, "PARTIAL BRAKING", (20, 235),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
-    elif state == "EMERGENCY":
-        cv2.putText(world, "EMERGENCY BRAKING", (20, 235),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2)
-    elif state == "FCW":
-        cv2.putText(world, "FORWARD COLLISION WARNING", (20, 235),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
-
-    cv2.imshow("2D World", world)
     timings["render"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
     # Plot once when run ends
-    # --------------------------------------------------------
     t0 = time.perf_counter()
     if not plots_shown and state in ("STOP", "CRASH"):
         plots_shown = True
@@ -751,6 +833,5 @@ for frame, tracks in main(yield_every_frame=True):
 
 cv2.destroyAllWindows()
 
-# If user quits before a STOP/CRASH, still show what we collected.
 if time_log and not plots_shown:
     plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_req_log, state_log)
