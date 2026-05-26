@@ -89,18 +89,53 @@ PIN_MOTOR_DIR = 16   # BTS7960 DIR
 PIN_SERVO     = 18   # servo signal  (BCM 12/13/18/19 support hardware PWM)
 PIN_BUZZER    = 20   # buzzer via NPN driver (2N2222)
 PIN_LED       = 21   # warning LED
-PIN_RELAY     = 26   # power-cut relay coil
+PIN_RELAY     = 26   # power-cut relay coil (HIGH = energised = actuator power CUT)
 PIN_ENC_A     =  5   # encoder channel A  (must be 3.3 V-safe)
 PIN_ENC_B     =  6   # encoder channel B  (must be 3.3 V-safe)
+PIN_PEDAL     = 19   # digital pedal sensor — manual brake override
+PIN_BTN1      = 23   # Button 1: speed select (10 / 20 / 30 km/h)
+PIN_BTN2      = 24   # Button 2: IDLE→INIT  |  INIT→RUN
+PIN_BTN3      = 25   # Button 3: RESET all states → IDLE
+
+BTN_BOUNCE_MS = 200  # debounce time in ms
 
 ENCODER_PPR           = 20    # pulses per revolution — calibrate to your encoder
 WHEEL_CIRCUMFERENCE_M = 0.15  # metres — measure your wheel
+
+# Speed presets for Button 1 (cycles through on each press)
+SPEED_PRESETS_MPS = [2.78, 5.56, 8.33]   # 10, 20, 30 km/h
+_speed_preset_idx = 0
 
 # Servo calibration — measure with a servo tester or oscilloscope and tune these
 SERVO_RELEASE_US  = 1000   # pulse width (µs) when brake fully released
 SERVO_PARTIAL_US  = 1500   # pulse width (µs) for partial brake (~40 %)
 SERVO_FULL_US     = 2000   # pulse width (µs) for full brake (100 %)
 # level 0.0 maps to SERVO_RELEASE_US, level 1.0 maps to SERVO_FULL_US
+
+# Thread-safe event flags set by GPIO interrupt callbacks,
+# consumed in the main control loop.
+_btn1_event   = threading.Event()
+_btn2_event   = threading.Event()
+_btn3_event   = threading.Event()
+manual_override = False   # True while pedal is pressed
+
+# ============================================================
+# GPIO interrupt callbacks  (run in RPi.GPIO callback thread)
+# ============================================================
+def _pedal_callback(channel):
+    global manual_override
+    pressed      = GPIO.input(PIN_PEDAL) == GPIO.HIGH
+    manual_override = pressed
+    set_relay_output(pressed)   # hardware power cut mirrors software override
+    if pressed:
+        set_brake_output(0.0)   # release brake immediately on override
+        print("[PEDAL] Manual override ACTIVE — auto brake disabled", flush=True)
+    else:
+        print("[PEDAL] Manual override released", flush=True)
+
+def _btn1_callback(channel): _btn1_event.set()
+def _btn2_callback(channel): _btn2_event.set()
+def _btn3_callback(channel): _btn3_event.set()
 
 # ============================================================
 # GPIO setup / teardown
@@ -120,6 +155,22 @@ def setup_gpio():
     GPIO.setup(PIN_ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(PIN_ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.add_event_detect(PIN_ENC_A, GPIO.RISING, callback=_encoder_isr)
+
+    # Pedal sensor — triggers on both edges so override releases immediately
+    GPIO.setup(PIN_PEDAL, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    GPIO.add_event_detect(PIN_PEDAL, GPIO.BOTH, callback=_pedal_callback,
+                          bouncetime=BTN_BOUNCE_MS)
+
+    # Physical buttons — active LOW (pulled up, button connects to GND)
+    for pin, cb in (
+        (PIN_BTN1, _btn1_callback),
+        (PIN_BTN2, _btn2_callback),
+        (PIN_BTN3, _btn3_callback),
+    ):
+        GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.add_event_detect(pin, GPIO.FALLING, callback=cb,
+                              bouncetime=BTN_BOUNCE_MS)
+
     _motor_pwm = GPIO.PWM(PIN_MOTOR_PWM, 1000)   # 1 kHz PWM for motor driver
     _motor_pwm.start(0)
 
@@ -183,6 +234,15 @@ def read_wheel_speed_mps() -> float:
 # ============================================================
 # Actuator outputs
 # ============================================================
+def set_relay_output(energize: bool):
+    """
+    energize=True  → relay coil ON  → NC opens → actuator 12 V CUT (manual override)
+    energize=False → relay coil OFF → NC closed → actuator 12 V ON  (normal operation)
+    """
+    if not _ON_RPI:
+        return
+    GPIO.output(PIN_RELAY, GPIO.HIGH if energize else GPIO.LOW)
+
 def set_warning_output(enabled: bool):
     if not _ON_RPI:
         return
@@ -464,6 +524,20 @@ try:
         t0  = time.perf_counter()
         key = (cv2.waitKey(1) & 0xFF) if should_display else 0xFF
 
+        # Physical button events override the keyboard key for this tick
+        if _btn1_event.is_set():
+            _btn1_event.clear()
+            _speed_preset_idx = (_speed_preset_idx + 1) % len(SPEED_PRESETS_MPS)
+            manual_speed_mps  = SPEED_PRESETS_MPS[_speed_preset_idx]
+            print(f"[BTN1] Speed → {manual_speed_mps:.2f} m/s "
+                  f"({manual_speed_mps * 3.6:.0f} km/h)", flush=True)
+        if _btn2_event.is_set():
+            _btn2_event.clear()
+            key = ord("i")
+        if _btn3_event.is_set():
+            _btn3_event.clear()
+            key = ord("r")
+
         if key == ord("q"):
             break
 
@@ -509,6 +583,7 @@ try:
             if   key == ord("w"): manual_speed_mps = min(manual_speed_mps + MANUAL_SPEED_STEP, MAX_DEMO_SPEED)
             elif key == ord("s"): manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
             elif key == ord(" "): manual_speed_mps = 0.0
+
         timings["key"] = time.perf_counter() - t0
 
         # ----------------------------------------------------
@@ -609,23 +684,29 @@ try:
                 robot_z += current_speed * DT
 
             elif status == "PARTIAL":
-                state = "PARTIAL"; warning_on = True; brake_on = True
+                state = "PARTIAL"; warning_on = True; brake_on = not manual_override
                 brake_level         = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
                 brake_trigger_speed = current_speed
                 brake_trigger_mode  = "PARTIAL"
                 brake_required_stop_distance = stopping_distance(current_speed, PARTIAL_BRAKE_DECEL)
-                set_warning_output(True); set_brake_output(brake_level)
+                set_warning_output(True)
+                if not manual_override:
+                    set_brake_output(brake_level)
 
             else:  # EMERGENCY
-                state = "EMERGENCY"; warning_on = True; brake_on = True; brake_level = 1.0
+                state = "EMERGENCY"; warning_on = True; brake_on = not manual_override
+                brake_level = 1.0
                 brake_trigger_speed = current_speed
                 brake_trigger_mode  = "EMERGENCY"
                 brake_required_stop_distance = stopping_distance(current_speed, FULL_BRAKE_DECEL)
-                set_warning_output(True); set_brake_output(1.0)
+                set_warning_output(True)
+                if not manual_override:
+                    set_brake_output(1.0)
 
         elif state == "PARTIAL":
             set_warning_output(True)
-            set_brake_output(PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL)
+            if not manual_override:
+                set_brake_output(PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL)
             current_speed    = max(current_speed - PARTIAL_BRAKE_DECEL * DT, 0.0)
             ego.set_speed(current_speed)
             robot_z         += current_speed * DT
@@ -641,7 +722,9 @@ try:
                 set_brake_output(brake_level)
 
         elif state == "EMERGENCY":
-            set_warning_output(True); set_brake_output(1.0)
+            set_warning_output(True)
+            if not manual_override:
+                set_brake_output(1.0)
             current_speed    = max(current_speed - FULL_BRAKE_DECEL * DT, 0.0)
             ego.set_speed(current_speed)
             robot_z         += current_speed * DT
@@ -706,8 +789,10 @@ try:
                         (20, 170), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
             cv2.putText(world, f"Brake: {'ON' if brake_on else 'OFF'}   Warning: {'ON' if warning_on else 'OFF'}",
                         (20, 205), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255,   0), 2)
-            cv2.putText(world, f"Brake level: {brake_level:.2f}   Mode: {status}",
-                        (20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255,   0), 2)
+            override_color = (0, 0, 255) if manual_override else (255, 255, 0)
+            override_txt   = "MANUAL OVERRIDE" if manual_override else f"Brake level: {brake_level:.2f}   Mode: {status}"
+            cv2.putText(world, override_txt,
+                        (20, 235), cv2.FONT_HERSHEY_SIMPLEX, 0.55, override_color, 2)
 
             span_m       = max(locked_initial_distance if locked_initial_distance else 5.0, 5.0)
             display_span = WORLD_WIDTH - 140
