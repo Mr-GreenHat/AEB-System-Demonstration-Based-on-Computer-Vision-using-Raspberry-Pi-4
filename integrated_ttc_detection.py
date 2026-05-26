@@ -29,7 +29,7 @@ def _import_original_main():
       - ./webcam_distance_test.py
     """
     try:
-        from ipm.webcam_distance_test import main as original_main
+        from webcam_distance_test import main as original_main
         return original_main
     except Exception:
         pass
@@ -41,7 +41,7 @@ def _import_original_main():
         raise ImportError(
             "Could not import main() from ipm.webcam_distance_test or webcam_distance_test. "
             "Check your project structure."
-        ) from e
+        ) 
 
 
 try:

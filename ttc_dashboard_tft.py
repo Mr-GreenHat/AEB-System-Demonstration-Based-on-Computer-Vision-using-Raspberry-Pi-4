@@ -44,7 +44,7 @@ TFT_HEIGHT = disp.height
 # DISPLAY OPTIONS
 # ============================================================
 UPDATE_TFT_EVERY_N_FRAMES = 5
-SHOW_DESKTOP_CAMERA = True
+SHOW_DESKTOP_CAMERA = False
 
 GRAPH_DELAY_SEC = 2.0
 GRAPH_ANIM_SEC = 2.0
@@ -60,9 +60,16 @@ def _ms(seconds: float) -> float:
 def print_timing(label: str, timings: dict):
     if not DEBUG_TIMING:
         return
-    parts = " | ".join(f"{k}={_ms(v):.2f}ms" for k, v in timings.items())
-    total = sum(timings.values())
-    print(f"[{label}] {parts} | total={_ms(total):.2f}ms", flush=True)
+
+    parts = " | ".join(
+        f"{k}={_ms(v):.2f}ms"
+        for k, v in timings.items()
+        if k != "loop_total"
+    )
+
+    loop_total = timings.get("loop_total", sum(timings.values()))
+
+    print(f"[{label}] {parts} | loop_total={_ms(loop_total):.2f}ms", flush=True)
 
 # ============================================================
 # CONFIG
@@ -518,32 +525,67 @@ graph_result_label = ""
 # ============================================================
 # MAIN LOOP
 # ============================================================
-for frame, tracks in main(yield_every_frame=True):
-    frame_counter += 1
-    loop_t0 = time.perf_counter()
-    timings = {}
+try:
+    for frame, tracks in main(
+        yield_every_frame=True,
+        intra_threads=2,
+        inter_threads=2,
+    ):
+        frame_counter += 1
+        loop_t0 = time.perf_counter()
+        timings = {}
 
-    # dt
-    t0 = time.perf_counter()
-    now = time.perf_counter()
-    dt = DT
-    last_frame_time = now
-    timings["dt"] = time.perf_counter() - t0
+        # dt
+        t0 = time.perf_counter()
+        now = time.perf_counter()
+        dt = DT
+        last_frame_time = now
+        timings["dt"] = time.perf_counter() - t0
 
-    # Keyboard controls
-    t0 = time.perf_counter()
-    key = cv2.waitKey(1) & 0xFF
+        # Keyboard controls
+        t0 = time.perf_counter()
+        key = cv2.waitKey(1) & 0xFF
 
-    if key == ord("q"):
-        timings["key"] = time.perf_counter() - t0
-        print_timing("EXIT", timings)
-        break
+        if key == ord("q"):
+            timings["key"] = time.perf_counter() - t0
+            print_timing("EXIT", timings)
+            break
 
-    elif key == ord("i"):
-        if state in ("IDLE", "STOP", "CRASH", "GRAPH"):
-            state = "INIT"
+        elif key == ord("i"):
+            if state in ("IDLE", "STOP", "CRASH", "GRAPH"):
+                state = "INIT"
+                init_samples = []
+                init_start_time = now
+                locked_initial_distance = None
+                virtual_distance = None
+                robot_z = 0.0
+                brake_on = False
+                warning_on = False
+                brake_level = 0.0
+                terminal_hold_start = None
+                graph_start_time = None
+                graph_distance_snapshot = 0.0
+                graph_result_label = ""
+                brake_trigger_speed = 0.0
+                brake_required_stop_distance = 0.0
+                brake_trigger_mode = None
+                time_log.clear()
+                distance_log.clear()
+                speed_log.clear()
+                ttc_log.clear()
+                travel_log.clear()
+                stop_req_log.clear()
+                state_log.clear()
+                sim_time = 0.0
+                current_speed = 0.0
+                set_warning_output(False)
+                set_brake_output(0.0)
+                reset_ego(ego)
+
+        elif key == ord("r"):
+            state = "IDLE"
             init_samples = []
-            init_start_time = now
+            init_start_time = None
             locked_initial_distance = None
             virtual_distance = None
             robot_z = 0.0
@@ -570,401 +612,379 @@ for frame, tracks in main(yield_every_frame=True):
             set_brake_output(0.0)
             reset_ego(ego)
 
-    elif key == ord("r"):
-        state = "IDLE"
-        init_samples = []
-        init_start_time = None
-        locked_initial_distance = None
-        virtual_distance = None
-        robot_z = 0.0
-        brake_on = False
-        warning_on = False
-        brake_level = 0.0
-        terminal_hold_start = None
-        graph_start_time = None
-        graph_distance_snapshot = 0.0
-        graph_result_label = ""
-        brake_trigger_speed = 0.0
-        brake_required_stop_distance = 0.0
-        brake_trigger_mode = None
-        time_log.clear()
-        distance_log.clear()
-        speed_log.clear()
-        ttc_log.clear()
-        travel_log.clear()
-        stop_req_log.clear()
-        state_log.clear()
-        sim_time = 0.0
-        current_speed = 0.0
-        set_warning_output(False)
-        set_brake_output(0.0)
-        reset_ego(ego)
+        elif USE_MANUAL_SPEED:
+            if key == ord("w"):
+                manual_speed_mps = min(manual_speed_mps + MANUAL_SPEED_STEP, MAX_DEMO_SPEED)
+            elif key == ord("s"):
+                manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
+            elif key == ord(" "):
+                manual_speed_mps = 0.0
 
-    elif USE_MANUAL_SPEED:
-        if key == ord("w"):
-            manual_speed_mps = min(manual_speed_mps + MANUAL_SPEED_STEP, MAX_DEMO_SPEED)
-        elif key == ord("s"):
-            manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
-        elif key == ord(" "):
-            manual_speed_mps = 0.0
+        timings["key"] = time.perf_counter() - t0
 
-    timings["key"] = time.perf_counter() - t0
-
-    # Desktop camera preview
-    t0 = time.perf_counter()
-    if SHOW_DESKTOP_CAMERA:
-        cv2.imshow("CV + Tracking", frame)
-    timings["camera_imshow"] = time.perf_counter() - t0
-
-    # Live distance
-    t0 = time.perf_counter()
-    live_distance = get_closest_live_distance(tracks)
-    last_live_distance = live_distance if live_distance is not None else last_live_distance
-    timings["live_distance"] = time.perf_counter() - t0
-
-    # ========================================================
-    # IDLE
-    # ========================================================
-    if state == "IDLE":
+        # Desktop camera preview
         t0 = time.perf_counter()
+        if SHOW_DESKTOP_CAMERA:
+            cv2.imshow("CV + Tracking", frame)
+        timings["camera_imshow"] = time.perf_counter() - t0
 
-        dashboard_speed = manual_speed_mps if USE_MANUAL_SPEED else current_speed
-        dashboard = render_dashboard(
-            state=state,
-            speed_mps=dashboard_speed,
-            virtual_distance_m=virtual_distance,
-            ttc_value=ttc,
-            brake_level=brake_level,
-            brake_on=brake_on,
-            warning_on=warning_on,
-            locked_initial_distance=locked_initial_distance,
-            live_distance=last_live_distance,
-            manual_speed_mps=manual_speed_mps,
-        )
-
-        if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
-            display_image(dashboard)
-
-        timings["idle_render"] = time.perf_counter() - t0
-        timings["loop_total"] = time.perf_counter() - loop_t0
-        if frame_counter % PRINT_EVERY_N_FRAMES == 0:
-            print_timing("IDLE", timings)
-        continue
-
-    # ========================================================
-    # INIT
-    # ========================================================
-    if state == "INIT":
+        # Live distance
         t0 = time.perf_counter()
+        live_distance = get_closest_live_distance(tracks)
+        last_live_distance = live_distance if live_distance is not None else last_live_distance
+        timings["live_distance"] = time.perf_counter() - t0
 
-        if live_distance is not None:
-            init_samples.append(live_distance)
+        # ========================================================
+        # IDLE
+        # ========================================================
+        if state == "IDLE":
+            t0 = time.perf_counter()
 
-        elapsed = now - init_start_time if init_start_time is not None else 0.0
+            dashboard_speed = manual_speed_mps if USE_MANUAL_SPEED else current_speed
+            dashboard = render_dashboard(
+                state=state,
+                speed_mps=dashboard_speed,
+                virtual_distance_m=virtual_distance,
+                ttc_value=ttc,
+                brake_level=brake_level,
+                brake_on=brake_on,
+                warning_on=warning_on,
+                locked_initial_distance=locked_initial_distance,
+                live_distance=last_live_distance,
+                manual_speed_mps=manual_speed_mps,
+            )
 
-        if (len(init_samples) >= INIT_REQUIRED_SAMPLES) or (
-            init_start_time is not None and (now - init_start_time) >= INIT_MAX_WAIT_SEC and len(init_samples) > 0
-        ):
-            locked_initial_distance = float(np.mean(init_samples))
-            virtual_distance = locked_initial_distance
-            robot_z = 0.0
-            current_speed = 0.0
-            brake_on = False
-            warning_on = False
-            brake_level = 0.0
-            set_warning_output(False)
-            set_brake_output(0.0)
-            reset_ego(ego)
-            ego.set_speed(0.0)
-            state = "RUN"
+            if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+                display_image(dashboard)
 
-        dashboard = render_dashboard(
-            state="INIT",
-            speed_mps=0.0,
-            virtual_distance_m=virtual_distance,
-            ttc_value=ttc,
-            brake_level=brake_level,
-            brake_on=brake_on,
-            warning_on=warning_on,
-            locked_initial_distance=locked_initial_distance,
-            live_distance=live_distance,
-            manual_speed_mps=manual_speed_mps,
-        )
+            timings["idle_render"] = time.perf_counter() - t0
+            timings["loop_total"] = time.perf_counter() - loop_t0
+            if frame_counter % PRINT_EVERY_N_FRAMES == 0:
+                print_timing("IDLE", timings)
+            continue
 
-        if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
-            display_image(dashboard)
+        # ========================================================
+        # INIT
+        # ========================================================
+        if state == "INIT":
+            t0 = time.perf_counter()
 
-        timings["init_render"] = time.perf_counter() - t0
-        timings["loop_total"] = time.perf_counter() - loop_t0
-        if frame_counter % PRINT_EVERY_N_FRAMES == 0:
-            print_timing("INIT", timings)
-        continue
+            if live_distance is not None:
+                init_samples.append(live_distance)
 
-    # ========================================================
-    # RUN / FCW / PARTIAL / EMERGENCY / STOP / CRASH / GRAPH
-    # ========================================================
-    if state == "GRAPH":
+            elapsed = now - init_start_time if init_start_time is not None else 0.0
+
+            if (len(init_samples) >= INIT_REQUIRED_SAMPLES) or (
+                init_start_time is not None and (now - init_start_time) >= INIT_MAX_WAIT_SEC and len(init_samples) > 0
+            ):
+                locked_initial_distance = float(np.mean(init_samples))
+                virtual_distance = locked_initial_distance
+                robot_z = 0.0
+                current_speed = 0.0
+                brake_on = False
+                warning_on = False
+                brake_level = 0.0
+                set_warning_output(False)
+                set_brake_output(0.0)
+                reset_ego(ego)
+                ego.set_speed(0.0)
+                state = "RUN"
+
+            dashboard = render_dashboard(
+                state="INIT",
+                speed_mps=0.0,
+                virtual_distance_m=virtual_distance,
+                ttc_value=ttc,
+                brake_level=brake_level,
+                brake_on=brake_on,
+                warning_on=warning_on,
+                locked_initial_distance=locked_initial_distance,
+                live_distance=live_distance,
+                manual_speed_mps=manual_speed_mps,
+            )
+
+            if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+                display_image(dashboard)
+
+            timings["init_render"] = time.perf_counter() - t0
+            timings["loop_total"] = time.perf_counter() - loop_t0
+            if frame_counter % PRINT_EVERY_N_FRAMES == 0:
+                print_timing("INIT", timings)
+            continue
+
+        # ========================================================
+        # RUN / FCW / PARTIAL / EMERGENCY / STOP / CRASH / GRAPH
+        # ========================================================
+        if state == "GRAPH":
+            t0 = time.perf_counter()
+
+            if graph_start_time is None:
+                graph_start_time = now
+
+            progress = (now - graph_start_time) / GRAPH_ANIM_SEC
+            img = render_animated_speed_graph(
+                time_log=time_log,
+                speed_log=speed_log,
+                ttc_log=ttc_log,
+                distance_left=graph_distance_snapshot,
+                progress=progress,
+                final_label=graph_result_label or "ENDED",
+            )
+            display_image(img)
+
+            timings["graph_render"] = time.perf_counter() - t0
+            timings["loop_total"] = time.perf_counter() - loop_t0
+            if frame_counter % PRINT_EVERY_N_FRAMES == 0:
+                print_timing("GRAPH", timings)
+            continue
+
         t0 = time.perf_counter()
+        wheel_speed_mps = read_wheel_speed_mps()
+        timings["read_speed"] = time.perf_counter() - t0
 
-        if graph_start_time is None:
-            graph_start_time = now
+        t0 = time.perf_counter()
+        if locked_initial_distance is not None:
+            virtual_distance = max(locked_initial_distance - robot_z, 0.0)
+        else:
+            virtual_distance = 0.0
+        timings["distance_calc"] = time.perf_counter() - t0
 
-        progress = (now - graph_start_time) / GRAPH_ANIM_SEC
-        img = render_animated_speed_graph(
-            time_log=time_log,
-            speed_log=speed_log,
-            ttc_log=ttc_log,
-            distance_left=graph_distance_snapshot,
-            progress=progress,
-            final_label=graph_result_label or "ENDED",
-        )
-        display_image(img)
+        t0 = time.perf_counter()
+        if state in ("RUN", "FCW"):
+            current_speed = wheel_speed_mps
+            ego.set_speed(current_speed)
 
-        timings["graph_render"] = time.perf_counter() - t0
-        timings["loop_total"] = time.perf_counter() - loop_t0
-        if frame_counter % PRINT_EVERY_N_FRAMES == 0:
-            print_timing("GRAPH", timings)
-        continue
+            ttc = ttc_from(virtual_distance, current_speed)
+            status = ttc_status(ttc)
 
-    t0 = time.perf_counter()
-    wheel_speed_mps = read_wheel_speed_mps()
-    timings["read_speed"] = time.perf_counter() - t0
+            if status == "SAFE":
+                state = "RUN"
+                warning_on = False
+                brake_on = False
+                brake_level = 0.0
+                set_warning_output(False)
+                set_brake_output(0.0)
+                robot_z += current_speed * dt
 
-    t0 = time.perf_counter()
-    if locked_initial_distance is not None:
-        virtual_distance = max(locked_initial_distance - robot_z, 0.0)
-    else:
-        virtual_distance = 0.0
-    timings["distance_calc"] = time.perf_counter() - t0
+            elif status == "FCW":
+                state = "FCW"
+                warning_on = True
+                brake_on = False
+                brake_level = 0.0
+                set_warning_output(True)
+                set_brake_output(0.0)
+                robot_z += current_speed * dt
 
-    t0 = time.perf_counter()
-    if state in ("RUN", "FCW"):
-        current_speed = wheel_speed_mps
-        ego.set_speed(current_speed)
+            elif status == "PARTIAL":
+                state = "PARTIAL"
+                warning_on = True
+                brake_on = True
+                brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
+                brake_trigger_speed = current_speed
+                brake_trigger_mode = "PARTIAL"
+                brake_required_stop_distance = stopping_distance(brake_trigger_speed, PARTIAL_BRAKE_DECEL)
+                set_warning_output(True)
+                set_brake_output(brake_level)
 
-        ttc = ttc_from(virtual_distance, current_speed)
-        status = ttc_status(ttc)
+            else:
+                state = "EMERGENCY"
+                warning_on = True
+                brake_on = True
+                brake_level = 1.0
+                brake_trigger_speed = current_speed
+                brake_trigger_mode = "EMERGENCY"
+                brake_required_stop_distance = stopping_distance(brake_trigger_speed, FULL_BRAKE_DECEL)
+                set_warning_output(True)
+                set_brake_output(brake_level)
 
-        if status == "SAFE":
-            state = "RUN"
-            warning_on = False
-            brake_on = False
-            brake_level = 0.0
-            set_warning_output(False)
-            set_brake_output(0.0)
-            robot_z += current_speed * dt
-
-        elif status == "FCW":
-            state = "FCW"
-            warning_on = True
-            brake_on = False
-            brake_level = 0.0
-            set_warning_output(True)
-            set_brake_output(0.0)
-            robot_z += current_speed * dt
-
-        elif status == "PARTIAL":
-            state = "PARTIAL"
+        elif state == "PARTIAL":
             warning_on = True
             brake_on = True
             brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
-            brake_trigger_speed = current_speed
-            brake_trigger_mode = "PARTIAL"
-            brake_required_stop_distance = stopping_distance(brake_trigger_speed, PARTIAL_BRAKE_DECEL)
             set_warning_output(True)
             set_brake_output(brake_level)
 
-        else:
-            state = "EMERGENCY"
+            current_speed = max(current_speed - PARTIAL_BRAKE_DECEL * dt, 0.0)
+            ego.set_speed(current_speed)
+            robot_z += current_speed * dt
+
+            virtual_distance = max(locked_initial_distance - robot_z, 0.0) if locked_initial_distance is not None else 0.0
+            ttc = ttc_from(virtual_distance, current_speed)
+            status = "PARTIAL"
+
+            if virtual_distance <= 0.0 and current_speed > STOP_EPS:
+                state = "CRASH"
+                current_speed = 0.0
+                ego.set_speed(0.0)
+                virtual_distance = 0.0
+                brake_level = 1.0
+                set_brake_output(brake_level)
+                if terminal_hold_start is None:
+                    terminal_hold_start = now
+                    graph_distance_snapshot = 0.0
+                    graph_result_label = "COLLISION"
+
+            elif current_speed <= STOP_EPS:
+                state = "STOP"
+                current_speed = 0.0
+                ego.set_speed(0.0)
+                brake_on = True
+                brake_level = 0.0
+                set_brake_output(0.0)
+                if terminal_hold_start is None:
+                    terminal_hold_start = now
+                    graph_distance_snapshot = virtual_distance
+                    graph_result_label = "STOPPED SAFELY"
+
+        elif state == "EMERGENCY":
             warning_on = True
             brake_on = True
             brake_level = 1.0
-            brake_trigger_speed = current_speed
-            brake_trigger_mode = "EMERGENCY"
-            brake_required_stop_distance = stopping_distance(brake_trigger_speed, FULL_BRAKE_DECEL)
             set_warning_output(True)
             set_brake_output(brake_level)
 
-    elif state == "PARTIAL":
-        warning_on = True
-        brake_on = True
-        brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
-        set_warning_output(True)
-        set_brake_output(brake_level)
+            current_speed = max(current_speed - FULL_BRAKE_DECEL * dt, 0.0)
+            ego.set_speed(current_speed)
+            robot_z += current_speed * dt
 
-        current_speed = max(current_speed - PARTIAL_BRAKE_DECEL * dt, 0.0)
-        ego.set_speed(current_speed)
-        robot_z += current_speed * dt
+            virtual_distance = max(locked_initial_distance - robot_z, 0.0) if locked_initial_distance is not None else 0.0
+            ttc = ttc_from(virtual_distance, current_speed)
+            status = "EMERGENCY"
 
-        virtual_distance = max(locked_initial_distance - robot_z, 0.0) if locked_initial_distance is not None else 0.0
-        ttc = ttc_from(virtual_distance, current_speed)
-        status = "PARTIAL"
+            if virtual_distance <= 0.0 and current_speed > STOP_EPS:
+                state = "CRASH"
+                current_speed = 0.0
+                ego.set_speed(0.0)
+                virtual_distance = 0.0
+                brake_level = 1.0
+                set_brake_output(brake_level)
+                if terminal_hold_start is None:
+                    terminal_hold_start = now
+                    graph_distance_snapshot = 0.0
+                    graph_result_label = "COLLISION"
 
-        if virtual_distance <= 0.0 and current_speed > STOP_EPS:
-            state = "CRASH"
+            elif current_speed <= STOP_EPS:
+                state = "STOP"
+                current_speed = 0.0
+                ego.set_speed(0.0)
+                brake_on = True
+                brake_level = 0.0
+                set_brake_output(0.0)
+                if terminal_hold_start is None:
+                    terminal_hold_start = now
+                    graph_distance_snapshot = virtual_distance
+                    graph_result_label = "STOPPED SAFELY"
+
+        elif state == "STOP":
             current_speed = 0.0
             ego.set_speed(0.0)
-            virtual_distance = 0.0
-            brake_level = 1.0
-            set_brake_output(brake_level)
-            if terminal_hold_start is None:
-                terminal_hold_start = now
-                graph_distance_snapshot = 0.0
-                graph_result_label = "COLLISION"
-
-        elif current_speed <= STOP_EPS:
-            state = "STOP"
-            current_speed = 0.0
-            ego.set_speed(0.0)
+            warning_on = False
             brake_on = True
             brake_level = 0.0
+            set_warning_output(False)
             set_brake_output(0.0)
-            if terminal_hold_start is None:
-                terminal_hold_start = now
-                graph_distance_snapshot = virtual_distance
-                graph_result_label = "STOPPED SAFELY"
-
-    elif state == "EMERGENCY":
-        warning_on = True
-        brake_on = True
-        brake_level = 1.0
-        set_warning_output(True)
-        set_brake_output(brake_level)
-
-        current_speed = max(current_speed - FULL_BRAKE_DECEL * dt, 0.0)
-        ego.set_speed(current_speed)
-        robot_z += current_speed * dt
-
-        virtual_distance = max(locked_initial_distance - robot_z, 0.0) if locked_initial_distance is not None else 0.0
-        ttc = ttc_from(virtual_distance, current_speed)
-        status = "EMERGENCY"
-
-        if virtual_distance <= 0.0 and current_speed > STOP_EPS:
-            state = "CRASH"
-            current_speed = 0.0
-            ego.set_speed(0.0)
-            virtual_distance = 0.0
-            brake_level = 1.0
-            set_brake_output(brake_level)
-            if terminal_hold_start is None:
-                terminal_hold_start = now
-                graph_distance_snapshot = 0.0
-                graph_result_label = "COLLISION"
-
-        elif current_speed <= STOP_EPS:
-            state = "STOP"
-            current_speed = 0.0
-            ego.set_speed(0.0)
-            brake_on = True
-            brake_level = 0.0
-            set_brake_output(0.0)
-            if terminal_hold_start is None:
-                terminal_hold_start = now
-                graph_distance_snapshot = virtual_distance
-                graph_result_label = "STOPPED SAFELY"
-
-    elif state == "STOP":
-        current_speed = 0.0
-        ego.set_speed(0.0)
-        warning_on = False
-        brake_on = True
-        brake_level = 0.0
-        set_warning_output(False)
-        set_brake_output(0.0)
-        ttc = math.inf
-        status = "STOP"
-
-        if terminal_hold_start is None:
-            terminal_hold_start = now
-            graph_distance_snapshot = virtual_distance if virtual_distance is not None else 0.0
-            graph_result_label = "STOPPED SAFELY"
-
-        if (now - terminal_hold_start) >= GRAPH_DELAY_SEC:
-            graph_start_time = now
-            state = "GRAPH"
-
-    elif state == "CRASH":
-        current_speed = 0.0
-        ego.set_speed(0.0)
-        warning_on = True
-        brake_on = True
-        brake_level = 1.0
-        set_warning_output(True)
-        set_brake_output(brake_level)
-        virtual_distance = 0.0
-        ttc = math.inf
-        status = "CRASH"
-
-        if terminal_hold_start is None:
-            terminal_hold_start = now
-            graph_distance_snapshot = 0.0
-            graph_result_label = "COLLISION"
-
-        if (now - terminal_hold_start) >= GRAPH_DELAY_SEC:
-            graph_start_time = now
-            state = "GRAPH"
-
-    timings["logic"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    if state not in ("RUN", "FCW", "PARTIAL", "EMERGENCY"):
-        if not math.isfinite(ttc):
             ttc = math.inf
-        if virtual_distance is None:
+            status = "STOP"
+
+            if terminal_hold_start is None:
+                terminal_hold_start = now
+                graph_distance_snapshot = virtual_distance if virtual_distance is not None else 0.0
+                graph_result_label = "STOPPED SAFELY"
+
+            if (now - terminal_hold_start) >= GRAPH_DELAY_SEC:
+                graph_start_time = now
+                state = "GRAPH"
+
+        elif state == "CRASH":
+            current_speed = 0.0
+            ego.set_speed(0.0)
+            warning_on = True
+            brake_on = True
+            brake_level = 1.0
+            set_warning_output(True)
+            set_brake_output(brake_level)
             virtual_distance = 0.0
-    timings["sanity"] = time.perf_counter() - t0
+            ttc = math.inf
+            status = "CRASH"
 
-    # Logs
-    t0 = time.perf_counter()
-    sim_time += DT
-    time_log.append(sim_time)
-    distance_log.append(virtual_distance if virtual_distance is not None else 0.0)
-    speed_log.append(current_speed)
-    ttc_log.append(ttc if math.isfinite(ttc) else np.nan)
-    travel_log.append(robot_z)
+            if terminal_hold_start is None:
+                terminal_hold_start = now
+                graph_distance_snapshot = 0.0
+                graph_result_label = "COLLISION"
 
-    if state in ("PARTIAL", "EMERGENCY"):
-        stop_req_log.append(brake_required_stop_distance)
-    else:
-        stop_req_log.append(0.0)
+            if (now - terminal_hold_start) >= GRAPH_DELAY_SEC:
+                graph_start_time = now
+                state = "GRAPH"
 
-    state_log.append(state)
-    timings["logging"] = time.perf_counter() - t0
+        timings["logic"] = time.perf_counter() - t0
 
-    # TFT rendering
-    t0 = time.perf_counter()
+        t0 = time.perf_counter()
+        if state not in ("RUN", "FCW", "PARTIAL", "EMERGENCY"):
+            if not math.isfinite(ttc):
+                ttc = math.inf
+            if virtual_distance is None:
+                virtual_distance = 0.0
+        timings["sanity"] = time.perf_counter() - t0
 
-    if state in ("STOP", "CRASH"):
-        remaining = max(GRAPH_DELAY_SEC - (now - terminal_hold_start), 0.0) if terminal_hold_start is not None else GRAPH_DELAY_SEC
-        img = render_stop_hold_screen(
-            result_label=graph_result_label or state,
-            distance_left=graph_distance_snapshot,
-            countdown=remaining,
-        )
-        display_image(img)
-        timings["render"] = time.perf_counter() - t0
-    else:
-        dashboard_speed = current_speed if state != "IDLE" else manual_speed_mps
-        dashboard = render_dashboard(
-            state=state,
-            speed_mps=dashboard_speed,
-            virtual_distance_m=virtual_distance,
-            ttc_value=ttc,
-            brake_level=brake_level,
-            brake_on=brake_on,
-            warning_on=warning_on,
-            locked_initial_distance=locked_initial_distance,
-            live_distance=live_distance,
-            manual_speed_mps=manual_speed_mps,
-        )
+        # Logs
+        t0 = time.perf_counter()
+        sim_time += DT
+        time_log.append(sim_time)
+        distance_log.append(virtual_distance if virtual_distance is not None else 0.0)
+        speed_log.append(current_speed)
+        ttc_log.append(ttc if math.isfinite(ttc) else np.nan)
+        travel_log.append(robot_z)
 
-        if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
-            display_image(dashboard)
+        if state in ("PARTIAL", "EMERGENCY"):
+            stop_req_log.append(brake_required_stop_distance)
+        else:
+            stop_req_log.append(0.0)
 
-        timings["render"] = time.perf_counter() - t0
+        state_log.append(state)
+        timings["logging"] = time.perf_counter() - t0
 
-    timings["loop_total"] = time.perf_counter() - loop_t0
-    if frame_counter % PRINT_EVERY_N_FRAMES == 0:
-        print_timing(state, timings)
+        # TFT rendering
+        t0 = time.perf_counter()
 
-cv2.destroyAllWindows()
+        if state in ("STOP", "CRASH"):
+            remaining = max(GRAPH_DELAY_SEC - (now - terminal_hold_start), 0.0) if terminal_hold_start is not None else GRAPH_DELAY_SEC
+            img = render_stop_hold_screen(
+                result_label=graph_result_label or state,
+                distance_left=graph_distance_snapshot,
+                countdown=remaining,
+            )
+            display_image(img)
+            timings["render"] = time.perf_counter() - t0
+        else:
+            dashboard_speed = current_speed if state != "IDLE" else manual_speed_mps
+            dashboard = render_dashboard(
+                state=state,
+                speed_mps=dashboard_speed,
+                virtual_distance_m=virtual_distance,
+                ttc_value=ttc,
+                brake_level=brake_level,
+                brake_on=brake_on,
+                warning_on=warning_on,
+                locked_initial_distance=locked_initial_distance,
+                live_distance=live_distance,
+                manual_speed_mps=manual_speed_mps,
+            )
+
+            if frame_counter % UPDATE_TFT_EVERY_N_FRAMES == 0:
+                display_image(dashboard)
+
+            timings["render"] = time.perf_counter() - t0
+
+        timings["loop_total"] = time.perf_counter() - loop_t0
+        if frame_counter % PRINT_EVERY_N_FRAMES == 0:
+            print_timing(state, timings)
+
+
+except KeyboardInterrupt:
+    print("\n[EXIT] Ctrl+C detected. Closing windows...", flush=True)
+
+finally:
+    cv2.destroyAllWindows()
+    for _ in range(5):
+        cv2.waitKey(1)
+    print("[EXIT] Cleanup complete.", flush=True)
