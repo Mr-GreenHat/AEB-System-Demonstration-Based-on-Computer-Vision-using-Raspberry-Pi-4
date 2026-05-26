@@ -8,9 +8,12 @@ from ego_sim import EgoVehicle
 from ipm.webcam_distance_test import main
 
 DEBUG_TIMING = True
-PRINT_EVERY_N_FRAMES = 1   # set to 30 later if the terminal spam slows everything down
+PRINT_EVERY_N_FRAMES = 30
 
 frame_counter = 0
+
+DISPLAY_EVERY_N_FRAMES = 4   # call imshow+waitKey every Nth frame (~15 FPS display)
+TV_MODE = False              # set True for HDMI TV; combines windows fullscreen
 
 def _ms(seconds: float) -> float:
     return seconds * 1000.0
@@ -25,7 +28,6 @@ def print_timing(label: str, timings: dict):
 # ============================================================
 # Config
 # ============================================================
-SCALE = 10
 WORLD_WIDTH = 1000
 WORLD_HEIGHT = 260
 
@@ -63,7 +65,8 @@ MAX_DEMO_SPEED = 5.0
 # Helpers
 # ============================================================
 def depth_to_meters(depth_value: float) -> float:
-    return max(float(depth_value) * SCALE, 0.0)
+    # smoothed_depth from the tracker is already in metres after calibration
+    return max(float(depth_value), 0.0)
 
 def ttc_from(distance_m: float, speed_mps: float) -> float:
     if speed_mps <= 1e-6:
@@ -146,6 +149,18 @@ def first_state_idx(state_log, target):
         if s == target:
             return i
     return None
+
+def _show(cam_frame, world_img):
+    if TV_MODE:
+        cam_h, cam_w = cam_frame.shape[:2]
+        w_h = cam_w * WORLD_HEIGHT // WORLD_WIDTH
+        world_scaled = cv2.resize(world_img, (cam_w, w_h))
+        combined = np.vstack([cam_frame, world_scaled])
+        cv2.imshow("AEB System", combined)
+    else:
+        cv2.imshow("CV + Tracking", cam_frame)
+        cv2.imshow("2D World", world_img)
+
 
 def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_req_log, state_log):
     if not time_log:
@@ -289,8 +304,13 @@ status = "SAFE"
 # ============================================================
 # Main loop
 # ============================================================
+if TV_MODE:
+    cv2.namedWindow("AEB System", cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty("AEB System", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
 for frame, tracks in main(yield_every_frame=True):
     frame_counter += 1
+    should_display = (frame_counter % DISPLAY_EVERY_N_FRAMES == 0)
     loop_t0 = time.perf_counter()
     timings = {}
 
@@ -310,7 +330,7 @@ for frame, tracks in main(yield_every_frame=True):
     # Keyboard controls
     # --------------------------------------------------------
     t0 = time.perf_counter()
-    key = cv2.waitKey(1) & 0xFF
+    key = (cv2.waitKey(1) & 0xFF) if should_display else 0xFF
     if key == ord("q"):
         timings["key"] = time.perf_counter() - t0
         print_timing("EXIT", timings)
@@ -380,12 +400,6 @@ for frame, tracks in main(yield_every_frame=True):
             manual_speed_mps = 0.0
     timings["key"] = time.perf_counter() - t0
 
-    # --------------------------------------------------------
-    # Draw camera preview
-    # --------------------------------------------------------
-    t0 = time.perf_counter()
-    cv2.imshow("CV + Tracking", frame)
-    timings["camera_imshow"] = time.perf_counter() - t0
 
     # --------------------------------------------------------
     # Get live distance
@@ -417,7 +431,8 @@ for frame, tracks in main(yield_every_frame=True):
             cv2.putText(world, "Live camera distance: none", (20, 140),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (180, 180, 180), 2)
 
-        cv2.imshow("2D World", world)
+        if should_display:
+            _show(frame, world)
         timings["idle_render"] = time.perf_counter() - t0
 
         timings["loop_total"] = time.perf_counter() - loop_t0
@@ -468,7 +483,8 @@ for frame, tracks in main(yield_every_frame=True):
             ego.set_speed(0.0)
             state = "RUN"
 
-        cv2.imshow("2D World", world)
+        if should_display:
+            _show(frame, world)
         timings["init_render"] = time.perf_counter() - t0
 
         timings["loop_total"] = time.perf_counter() - loop_t0
@@ -733,7 +749,8 @@ for frame, tracks in main(yield_every_frame=True):
         cv2.putText(world, "FORWARD COLLISION WARNING", (20, 235),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2)
 
-    cv2.imshow("2D World", world)
+    if should_display:
+        _show(frame, world)
     timings["render"] = time.perf_counter() - t0
 
     # --------------------------------------------------------

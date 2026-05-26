@@ -46,6 +46,8 @@ YOLO_IOU_THRES = 0.45
 # COCO: 0 person, 2 car, 3 motorcycle, 5 bus, 7 truck
 TARGET_CLASSES = {0, 2, 3, 5, 7}
 
+VERBOSE_DEPTH = False  # set True only for calibration; spams terminal every frame
+
 camera_intrinsics_path = r"C:\Users\adjip\Documents\python\ASO-IPM\calibration\camera_intrinsics640x480.npz"
 
 
@@ -612,10 +614,11 @@ class Track:
             else:
                 self.smoothed_depth = np.nan
 
-            print(
-                f"ID={self.id} bottom_v={self.bottom_v:.1f} "
-                f"raw={raw_depth_m:.2f}m corrected={corrected_depth_m:.2f}m"
-            )
+            if VERBOSE_DEPTH:
+                print(
+                    f"ID={self.id} bottom_v={self.bottom_v:.1f} "
+                    f"raw={raw_depth_m:.2f}m corrected={corrected_depth_m:.2f}m"
+                )
 
         except Exception as e:
             print("Depth error:", e)
