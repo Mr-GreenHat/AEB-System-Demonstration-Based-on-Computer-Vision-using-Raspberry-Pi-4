@@ -143,25 +143,41 @@ def _btn3_callback(channel): _btn3_event.set()
 _motor_pwm = None
 _servo_pwm = None   # RPi.GPIO fallback — used only when pigpio unavailable
 
+def _safe_add_event(pin, edge, callback, bouncetime=0):
+    """Add edge detection, silently removing any stale registration first."""
+    try:
+        GPIO.remove_event_detect(pin)
+    except Exception:
+        pass
+    try:
+        if bouncetime:
+            GPIO.add_event_detect(pin, edge, callback=callback,
+                                  bouncetime=bouncetime)
+        else:
+            GPIO.add_event_detect(pin, edge, callback=callback)
+    except RuntimeError as e:
+        print(f"[GPIO] Warning: edge detection on pin {pin} failed ({e}) — "
+              "callbacks for this pin will not fire", flush=True)
+
 def setup_gpio():
     global _motor_pwm, _servo_pwm
     if not _ON_RPI:
         return
+    GPIO.cleanup()           # full kernel reset — clears stale state from crashes
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
     for pin in (PIN_MOTOR_DIR, PIN_BUZZER, PIN_LED, PIN_RELAY):
         GPIO.setup(pin, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(PIN_MOTOR_PWM, GPIO.OUT)
+
     GPIO.setup(PIN_ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(PIN_ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-    GPIO.remove_event_detect(PIN_ENC_A)
-    GPIO.add_event_detect(PIN_ENC_A, GPIO.RISING, callback=_encoder_isr)
+    _safe_add_event(PIN_ENC_A, GPIO.RISING, _encoder_isr)
 
     # Pedal sensor — triggers on both edges so override releases immediately
     GPIO.setup(PIN_PEDAL, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-    GPIO.remove_event_detect(PIN_PEDAL)
-    GPIO.add_event_detect(PIN_PEDAL, GPIO.BOTH, callback=_pedal_callback,
-                          bouncetime=BTN_BOUNCE_MS)
+    _safe_add_event(PIN_PEDAL, GPIO.BOTH, _pedal_callback,
+                    bouncetime=BTN_BOUNCE_MS)
 
     # Physical buttons — active LOW (pulled up, button connects to GND)
     for pin, cb in (
@@ -170,9 +186,7 @@ def setup_gpio():
         (PIN_BTN3, _btn3_callback),
     ):
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-        GPIO.remove_event_detect(pin)
-        GPIO.add_event_detect(pin, GPIO.FALLING, callback=cb,
-                              bouncetime=BTN_BOUNCE_MS)
+        _safe_add_event(pin, GPIO.FALLING, cb, bouncetime=BTN_BOUNCE_MS)
 
     _motor_pwm = GPIO.PWM(PIN_MOTOR_PWM, 1000)   # 1 kHz PWM for motor driver
     _motor_pwm.start(0)
