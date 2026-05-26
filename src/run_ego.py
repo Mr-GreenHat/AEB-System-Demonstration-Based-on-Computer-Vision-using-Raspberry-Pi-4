@@ -154,10 +154,12 @@ def setup_gpio():
     GPIO.setup(PIN_MOTOR_PWM, GPIO.OUT)
     GPIO.setup(PIN_ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(PIN_ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+    GPIO.remove_event_detect(PIN_ENC_A)
     GPIO.add_event_detect(PIN_ENC_A, GPIO.RISING, callback=_encoder_isr)
 
     # Pedal sensor — triggers on both edges so override releases immediately
     GPIO.setup(PIN_PEDAL, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+    GPIO.remove_event_detect(PIN_PEDAL)
     GPIO.add_event_detect(PIN_PEDAL, GPIO.BOTH, callback=_pedal_callback,
                           bouncetime=BTN_BOUNCE_MS)
 
@@ -168,6 +170,7 @@ def setup_gpio():
         (PIN_BTN3, _btn3_callback),
     ):
         GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        GPIO.remove_event_detect(pin)
         GPIO.add_event_detect(pin, GPIO.FALLING, callback=cb,
                               bouncetime=BTN_BOUNCE_MS)
 
