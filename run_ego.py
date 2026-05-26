@@ -8,7 +8,7 @@ from ego_sim import EgoVehicle
 from webcam_distance_test import main
 
 DEBUG_TIMING = True
-PRINT_EVERY_N_FRAMES = 1   # set to 30 later if the terminal spam slows everything down
+PRINT_EVERY_N_FRAMES = 30   # set to 30 later if the terminal spam slows everything down
 
 frame_counter = 0
 
