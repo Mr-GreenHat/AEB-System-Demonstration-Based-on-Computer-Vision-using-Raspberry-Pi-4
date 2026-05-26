@@ -17,6 +17,17 @@ try:
 except ImportError:
     _ON_RPI = False
 
+# pigpio gives hardware-timed PWM — no servo jitter.
+# RPi.GPIO software PWM is the fallback (works but servo may buzz).
+# To use pigpio: sudo apt install pigpio python3-pigpio && sudo pigpiod
+try:
+    import pigpio as _pigpio_mod
+    _pigpio_pi = _pigpio_mod.pi() if _ON_RPI else None
+    _USE_PIGPIO = _ON_RPI and (_pigpio_pi is not None) and _pigpio_pi.connected
+except Exception:
+    _pigpio_pi  = None
+    _USE_PIGPIO = False
+
 # ============================================================
 # Timing / display config
 # ============================================================
@@ -73,8 +84,9 @@ manual_speed_mps = 0.0
 # ============================================================
 # GPIO pin assignments  (BCM numbering)
 # ============================================================
-PIN_MOTOR_PWM = 12   # BTS7960 PWM  → brake actuator duty
+PIN_MOTOR_PWM = 12   # BTS7960 PWM  → drive motor duty
 PIN_MOTOR_DIR = 16   # BTS7960 DIR
+PIN_SERVO     = 18   # servo signal  (BCM 12/13/18/19 support hardware PWM)
 PIN_BUZZER    = 20   # buzzer via NPN driver (2N2222)
 PIN_LED       = 21   # warning LED
 PIN_RELAY     = 26   # power-cut relay coil
@@ -84,13 +96,20 @@ PIN_ENC_B     =  6   # encoder channel B  (must be 3.3 V-safe)
 ENCODER_PPR           = 20    # pulses per revolution — calibrate to your encoder
 WHEEL_CIRCUMFERENCE_M = 0.15  # metres — measure your wheel
 
+# Servo calibration — measure with a servo tester or oscilloscope and tune these
+SERVO_RELEASE_US  = 1000   # pulse width (µs) when brake fully released
+SERVO_PARTIAL_US  = 1500   # pulse width (µs) for partial brake (~40 %)
+SERVO_FULL_US     = 2000   # pulse width (µs) for full brake (100 %)
+# level 0.0 maps to SERVO_RELEASE_US, level 1.0 maps to SERVO_FULL_US
+
 # ============================================================
 # GPIO setup / teardown
 # ============================================================
 _motor_pwm = None
+_servo_pwm = None   # RPi.GPIO fallback — used only when pigpio unavailable
 
 def setup_gpio():
-    global _motor_pwm
+    global _motor_pwm, _servo_pwm
     if not _ON_RPI:
         return
     GPIO.setmode(GPIO.BCM)
@@ -101,12 +120,32 @@ def setup_gpio():
     GPIO.setup(PIN_ENC_A, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.setup(PIN_ENC_B, GPIO.IN, pull_up_down=GPIO.PUD_UP)
     GPIO.add_event_detect(PIN_ENC_A, GPIO.RISING, callback=_encoder_isr)
-    _motor_pwm = GPIO.PWM(PIN_MOTOR_PWM, 1000)   # 1 kHz PWM carrier
+    _motor_pwm = GPIO.PWM(PIN_MOTOR_PWM, 1000)   # 1 kHz PWM for motor driver
     _motor_pwm.start(0)
+
+    if _USE_PIGPIO:
+        # pigpio: set servo to release position at startup
+        _pigpio_pi.set_servo_pulsewidth(PIN_SERVO, SERVO_RELEASE_US)
+        print("[GPIO] Servo on pigpio (hardware PWM) — no jitter", flush=True)
+    else:
+        # RPi.GPIO software PWM fallback — 50 Hz standard servo frequency
+        GPIO.setup(PIN_SERVO, GPIO.OUT)
+        _servo_pwm = GPIO.PWM(PIN_SERVO, 50)
+        release_duty = SERVO_RELEASE_US / 20000.0 * 100.0
+        _servo_pwm.start(release_duty)
+        print("[GPIO] Servo on RPi.GPIO software PWM (may buzz slightly)", flush=True)
 
 def cleanup_gpio():
     if not _ON_RPI:
         return
+    # Park servo at release position before shutdown
+    set_servo_position(0.0)
+    time.sleep(0.3)
+    if _USE_PIGPIO:
+        _pigpio_pi.set_servo_pulsewidth(PIN_SERVO, 0)   # 0 = stop sending pulses
+        _pigpio_pi.stop()
+    elif _servo_pwm:
+        _servo_pwm.stop()
     if _motor_pwm:
         _motor_pwm.stop()
     GPIO.cleanup()
@@ -153,10 +192,31 @@ def set_warning_output(enabled: bool):
 
 def set_brake_output(level: float):
     level = float(np.clip(level, 0.0, 1.0))
+    set_servo_position(level)          # servo is the primary brake actuator
     if not _ON_RPI or _motor_pwm is None:
         return
-    GPIO.output(PIN_MOTOR_DIR, GPIO.HIGH)          # always brake direction
+    GPIO.output(PIN_MOTOR_DIR, GPIO.HIGH)
     _motor_pwm.ChangeDutyCycle(level * 100.0)
+
+def set_servo_position(level: float):
+    """
+    Move the servo to the position corresponding to brake level.
+
+    level 0.0 → SERVO_RELEASE_US  (brake fully off)
+    level 1.0 → SERVO_FULL_US     (brake fully on)
+
+    Tune SERVO_RELEASE_US / SERVO_FULL_US in the config above to match
+    your physical brake linkage — measure with a servo tester first.
+    """
+    level    = float(np.clip(level, 0.0, 1.0))
+    pulse_us = int(SERVO_RELEASE_US + level * (SERVO_FULL_US - SERVO_RELEASE_US))
+    if not _ON_RPI:
+        return
+    if _USE_PIGPIO and _pigpio_pi is not None:
+        _pigpio_pi.set_servo_pulsewidth(PIN_SERVO, pulse_us)
+    elif _servo_pwm is not None:
+        # duty cycle (%) = pulse_us / period_us * 100, period = 20 000 µs at 50 Hz
+        _servo_pwm.ChangeDutyCycle(pulse_us / 20000.0 * 100.0)
 
 # ============================================================
 # Vision thread — YOLO runs here, never blocks the control loop
