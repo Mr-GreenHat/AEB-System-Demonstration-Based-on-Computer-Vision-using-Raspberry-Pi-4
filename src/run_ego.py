@@ -41,25 +41,18 @@ INIT_REQUIRED_SAMPLES = 8
 INIT_MAX_WAIT_SEC = 2.0
 
 # ============================================================
-# Braking / risk logic aligned to the presentation
-# Safe:           TTC > 4.6 s
-# FCW:            2.9 s < TTC <= 4.6 s
-# Partial braking:1.1 s < TTC <= 2.9 s
-# Emergency:      TTC <= 1.1 s
-# Partial braking is about 30%, full emergency braking is 100%.
-# Full emergency deceleration target: 8 m/s^2
+# TTC / braking settings
 # ============================================================
-SAFE_TTC = 4.6
-FCW_TTC = 2.9
-PARTIAL_TTC = 1.1
+DT = 0.02
 
-PARTIAL_BRAKE_LEVEL = 0.30
-FULL_BRAKE_LEVEL = 1.00
+SAFE_TTC = 2.6
+FCW_TTC = 1.6
+PARTIAL_TTC = 0.6
 
-FULL_BRAKE_DECEL = 8.0
-PARTIAL_BRAKE_DECEL = FULL_BRAKE_DECEL * PARTIAL_BRAKE_LEVEL
+FULL_BRAKE_DECEL = 6.43
+PARTIAL_BRAKE_DECEL = FULL_BRAKE_DECEL * 0.4
 
-STOP_SPEED_EPS = 0.05
+STOP_EPS = 0.01
 
 # Demo speed controls if encoder is not connected yet
 USE_MANUAL_SPEED = True
@@ -198,36 +191,40 @@ def plot_results(time_log, distance_log, speed_log, ttc_log, travel_log, stop_re
     plt.grid(True)
     plt.legend()
 
-    # 3) TTC vs Time
+    # 3) TTC vs Time with clean bands
     plt.figure(figsize=(9, 4))
-    plt.plot(time_log, ttc_log, label="TTC")
-    plt.axhline(SAFE_TTC, linestyle="--", label="Safe threshold")
-    plt.axhline(FCW_TTC, linestyle="--", label="FCW threshold")
-    plt.axhline(PARTIAL_TTC, linestyle=":", label="Emergency threshold")
+
+    ttc_arr = np.array(ttc_log, dtype=float)
+    finite_ttc = ttc_arr[np.isfinite(ttc_arr)]
+    if finite_ttc.size > 0:
+        y_top = max(float(np.max(finite_ttc)), SAFE_TTC + 0.5)
+    else:
+        y_top = SAFE_TTC + 1.0
+
+    # background zones
+    plt.axhspan(0, PARTIAL_TTC, color="red", alpha=0.20, label="Emergency")
+    plt.axhspan(PARTIAL_TTC, FCW_TTC, color="orange", alpha=0.20, label="Partial")
+    plt.axhspan(FCW_TTC, SAFE_TTC, color="yellow", alpha=0.20, label="FCW")
+    plt.axhspan(SAFE_TTC, y_top, color="green", alpha=0.12, label="Safe")
+
+    # threshold lines
+    plt.axhline(SAFE_TTC, linestyle="--", color="blue")
+    plt.axhline(FCW_TTC, linestyle="--", color="blue")
+    plt.axhline(PARTIAL_TTC, linestyle="--", color="blue")
+
+    # TTC curve
+    plt.plot(time_log, ttc_log, color="black", label="TTC")
+
     if fcw_idx is not None:
         plt.axvline(time_log[fcw_idx], linestyle="--", label="FCW trigger")
     if partial_idx is not None:
         plt.axvline(time_log[partial_idx], linestyle="--", label="Partial brake trigger")
     if emergency_idx is not None:
         plt.axvline(time_log[emergency_idx], linestyle="--", label="Emergency brake trigger")
+
     plt.xlabel("Time (s)")
     plt.ylabel("TTC (s)")
     plt.title("TTC vs Time")
-    plt.grid(True)
-    plt.legend()
-
-    # 4) Actual vs theoretical stopping comparison
-    plt.figure(figsize=(9, 4))
-    plt.plot(time_log, travel_log, label="Actual travel (virtual)")
-    plt.plot(time_log, stop_req_log, label="Required stopping distance")
-    plt.plot(time_log, distance_log, linestyle="--", label="Remaining distance")
-    if partial_idx is not None:
-        plt.axvline(time_log[partial_idx], linestyle="--", label="Partial brake trigger")
-    if emergency_idx is not None:
-        plt.axvline(time_log[emergency_idx], linestyle="--", label="Emergency brake trigger")
-    plt.xlabel("Time (s)")
-    plt.ylabel("Meters")
-    plt.title("Stopping Distance Comparison")
     plt.grid(True)
     plt.legend()
 
@@ -303,9 +300,9 @@ for frame, tracks in main(yield_every_frame=True):
     t0 = time.perf_counter()
     now = time.perf_counter()
     if last_frame_time is None:
-        dt = 1.0 / 30.0
+        dt = DT
     else:
-        dt = max(now - last_frame_time, 1e-3)
+        dt = DT
     last_frame_time = now
     timings["dt"] = time.perf_counter() - t0
 
@@ -524,7 +521,7 @@ for frame, tracks in main(yield_every_frame=True):
             state = "PARTIAL"
             warning_on = True
             brake_on = True
-            brake_level = PARTIAL_BRAKE_LEVEL
+            brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
             brake_trigger_speed = current_speed
             brake_trigger_mode = "PARTIAL"
             brake_required_stop_distance = stopping_distance(brake_trigger_speed, PARTIAL_BRAKE_DECEL)
@@ -535,7 +532,7 @@ for frame, tracks in main(yield_every_frame=True):
             state = "EMERGENCY"
             warning_on = True
             brake_on = True
-            brake_level = FULL_BRAKE_LEVEL
+            brake_level = 1.0
             brake_trigger_speed = current_speed
             brake_trigger_mode = "EMERGENCY"
             brake_required_stop_distance = stopping_distance(brake_trigger_speed, FULL_BRAKE_DECEL)
@@ -545,7 +542,7 @@ for frame, tracks in main(yield_every_frame=True):
     elif state == "PARTIAL":
         warning_on = True
         brake_on = True
-        brake_level = PARTIAL_BRAKE_LEVEL
+        brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
         set_warning_output(True)
         set_brake_output(brake_level)
 
@@ -557,26 +554,26 @@ for frame, tracks in main(yield_every_frame=True):
         ttc = ttc_from(virtual_distance, current_speed)
         status = "PARTIAL"
 
-        if virtual_distance <= 0.0 and current_speed > STOP_SPEED_EPS:
+        if virtual_distance <= 0.0 and current_speed > STOP_EPS:
             state = "CRASH"
             current_speed = 0.0
             ego.set_speed(0.0)
             virtual_distance = 0.0
-            brake_level = FULL_BRAKE_LEVEL
+            brake_level = 1.0
             set_brake_output(brake_level)
 
-        elif current_speed <= STOP_SPEED_EPS:
+        elif current_speed <= STOP_EPS:
             state = "STOP"
             current_speed = 0.0
             ego.set_speed(0.0)
             brake_on = True
-            brake_level = PARTIAL_BRAKE_LEVEL
+            brake_level = PARTIAL_BRAKE_DECEL / FULL_BRAKE_DECEL
             set_brake_output(brake_level)
 
     elif state == "EMERGENCY":
         warning_on = True
         brake_on = True
-        brake_level = FULL_BRAKE_LEVEL
+        brake_level = 1.0
         set_warning_output(True)
         set_brake_output(brake_level)
 
@@ -588,20 +585,20 @@ for frame, tracks in main(yield_every_frame=True):
         ttc = ttc_from(virtual_distance, current_speed)
         status = "EMERGENCY"
 
-        if virtual_distance <= 0.0 and current_speed > STOP_SPEED_EPS:
+        if virtual_distance <= 0.0 and current_speed > STOP_EPS:
             state = "CRASH"
             current_speed = 0.0
             ego.set_speed(0.0)
             virtual_distance = 0.0
-            brake_level = FULL_BRAKE_LEVEL
+            brake_level = 1.0
             set_brake_output(brake_level)
 
-        elif current_speed <= STOP_SPEED_EPS:
+        elif current_speed <= STOP_EPS:
             state = "STOP"
             current_speed = 0.0
             ego.set_speed(0.0)
             brake_on = True
-            brake_level = FULL_BRAKE_LEVEL
+            brake_level = 1.0
             set_brake_output(brake_level)
 
     elif state == "STOP":
@@ -620,7 +617,7 @@ for frame, tracks in main(yield_every_frame=True):
         ego.set_speed(0.0)
         warning_on = True
         brake_on = True
-        brake_level = FULL_BRAKE_LEVEL
+        brake_level = 1.0
         set_warning_output(True)
         set_brake_output(brake_level)
         virtual_distance = 0.0
