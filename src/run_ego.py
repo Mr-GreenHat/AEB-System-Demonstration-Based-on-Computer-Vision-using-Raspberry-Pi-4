@@ -34,7 +34,10 @@ except Exception:
 DEBUG_TIMING        = True
 PRINT_EVERY_N_LOOPS = 150   # ~every 3 s at 50 Hz
 DISPLAY_EVERY_N     = 3     # ~17 FPS display at 50 Hz
-TV_MODE             = False  # set True for HDMI TV; one combined fullscreen window
+TV_MODE             = True   # HDMI TV fullscreen mode for Sharp 2T-C42BE1 / 1080p
+SCREEN_W            = 1920   # Sharp 2T-C42BE1 Full HD width
+SCREEN_H            = 1080   # Sharp 2T-C42BE1 Full HD height
+CAM_DISPLAY_H       = 760    # camera area height; remaining height is the 2D world
 
 # ============================================================
 # Control loop rate  — decoupled from YOLO speed
@@ -377,11 +380,25 @@ def first_state_idx(state_log, target):
     return None
 
 def _show(cam_frame, world_img):
+    """
+    Display output.
+
+    TV_MODE=True creates one 1920x1080 fullscreen HDMI image for the
+    Sharp 2T-C42BE1. The camera view fills the top area and the 2D world
+    panel fills the bottom area.
+    """
     if TV_MODE:
-        cam_h, cam_w = cam_frame.shape[:2]
-        w_h          = cam_w * WORLD_HEIGHT // WORLD_WIDTH
-        world_scaled = cv2.resize(world_img, (cam_w, w_h))
-        combined     = np.vstack([cam_frame, world_scaled])
+        # Guard against bad camera frames so one failed frame does not crash display.
+        if cam_frame is None or world_img is None:
+            return
+
+        cam_h = int(np.clip(CAM_DISPLAY_H, 1, SCREEN_H - 1))
+        world_h = SCREEN_H - cam_h
+
+        cam_resized = cv2.resize(cam_frame, (SCREEN_W, cam_h), interpolation=cv2.INTER_LINEAR)
+        world_resized = cv2.resize(world_img, (SCREEN_W, world_h), interpolation=cv2.INTER_LINEAR)
+
+        combined = np.vstack([cam_resized, world_resized])
         cv2.imshow("AEB System", combined)
     else:
         cv2.imshow("CV + Tracking", cam_frame)
@@ -499,6 +516,7 @@ setup_gpio()
 
 if TV_MODE:
     cv2.namedWindow("AEB System", cv2.WINDOW_NORMAL)
+    cv2.resizeWindow("AEB System", SCREEN_W, SCREEN_H)
     cv2.setWindowProperty("AEB System", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 _vision_thread = threading.Thread(target=_vision_worker, daemon=True)
