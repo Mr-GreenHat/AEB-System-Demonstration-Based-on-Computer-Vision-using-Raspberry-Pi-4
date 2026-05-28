@@ -1,3 +1,9 @@
+import os
+# Avoid OpenCV Qt font crash/warnings on Raspberry Pi / Python venv.
+# This must be set before importing cv2.
+if os.path.isdir("/usr/share/fonts/truetype/dejavu"):
+    os.environ.setdefault("QT_QPA_FONTDIR", "/usr/share/fonts/truetype/dejavu")
+
 import cv2
 import numpy as np
 import time
@@ -6,7 +12,7 @@ import threading
 import matplotlib.pyplot as plt
 
 from ego_sim import EgoVehicle
-from ipm.webcam_distance_test import main as vision_main
+from webcam_distance_test import main as vision_main
 
 # ============================================================
 # RPi GPIO — imported if available; stubs used on dev machine
@@ -33,9 +39,9 @@ except Exception:
 # ============================================================
 DEBUG_TIMING        = True
 PRINT_EVERY_N_LOOPS = 150   # ~every 3 s at 50 Hz
-DISPLAY_EVERY_N     = 3     # ~17 FPS display at 50 Hz
+DISPLAY_EVERY_N     = 5     # ~10 FPS display at 50 Hz; safer for 1080p dashboard
 SHOW_MATPLOTLIB_PLOTS = False  # keep False for HDMI demo; plt.show() can block closing
-TV_MODE             = True   # HDMI TV fullscreen mode for Sharp 2T-C42BE1 / 1080p
+TV_MODE             = True   # HDMI TV mode for Sharp 2T-C42BE1 / 1080p
 SCREEN_W            = 1920   # Sharp 2T-C42BE1 Full HD width
 SCREEN_H            = 1080   # Sharp 2T-C42BE1 Full HD height
 # 1080p dashboard layout: camera + status on top, graph + ego animation below
@@ -48,6 +54,14 @@ GRAPH_W             = 1240
 EGO_W               = SCREEN_W - GRAPH_W
 GRAPH_HISTORY_SEC   = 12.0
 CAM_DISPLAY_H       = TOP_H   # kept for compatibility with old display path
+USE_OPENCV_FULLSCREEN = False  # False is safer; Qt fullscreen can crash on some Raspberry Pi/OpenCV builds
+
+# On-screen mouse/touch EXIT button. Useful when keyboard focus breaks.
+EXIT_BUTTON_W       = 150
+EXIT_BUTTON_H       = 64
+EXIT_BUTTON_MARGIN  = 18
+_exit_requested     = False
+
 
 # ============================================================
 # Control loop rate  — decoupled from YOLO speed
@@ -629,6 +643,9 @@ def _make_dashboard(cam_frame):
     cv2.line(dashboard, (CAM_W, 0), (CAM_W, TOP_H), (100, 100, 100), 2)
     cv2.line(dashboard, (0, TOP_H), (SCREEN_W, TOP_H), (100, 100, 100), 2)
     cv2.line(dashboard, (GRAPH_W, TOP_H), (GRAPH_W, SCREEN_H), (100, 100, 100), 2)
+
+    # Draw this last so it stays clickable and visible above all panels.
+    _draw_exit_button(dashboard)
     return dashboard
 
 
@@ -636,7 +653,7 @@ def _show(cam_frame, world_img=None):
     """
     Display output.
 
-    TV_MODE=True + DASHBOARD_MODE=True creates one 1920x1080 fullscreen HDMI
+    TV_MODE=True + DASHBOARD_MODE=True creates one 1920x1080 HDMI
     dashboard for the Sharp 2T-C42BE1:
       top-left: camera feedback
       top-right: large status panel
@@ -775,8 +792,13 @@ setup_gpio()
 
 if TV_MODE:
     cv2.namedWindow("AEB System", cv2.WINDOW_NORMAL)
+    cv2.moveWindow("AEB System", 0, 0)
     cv2.resizeWindow("AEB System", SCREEN_W, SCREEN_H)
-    cv2.setWindowProperty("AEB System", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.setMouseCallback("AEB System", _mouse_callback)
+    if USE_OPENCV_FULLSCREEN:
+        # Warning: this can crash on some Raspberry Pi/OpenCV Qt builds with:
+        # FATAL: exception not rethrown
+        cv2.setWindowProperty("AEB System", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
 _vision_thread = threading.Thread(target=_vision_worker, daemon=True)
 _vision_thread.start()
@@ -832,8 +854,8 @@ try:
             _btn3_event.clear()
             key = ord("r")
 
-        # Exit keys: q or ESC. Also exit if the user closes the OpenCV window.
-        if key in (ord("q"), 27):
+        # Exit keys: q/Q or ESC. Also exit if the user closes the OpenCV window.
+        if key in (ord("q"), ord("Q"), 27) or _exit_requested:
             break
         if TV_MODE:
             try:
@@ -842,7 +864,10 @@ try:
             except cv2.error:
                 break
 
-        elif key == ord("i") and state in ("IDLE", "STOP", "CRASH"):
+        # Start/init keys: accept lowercase i and uppercase I.
+        # IMPORTANT: this must be a separate if, not an elif attached to the TV_MODE check.
+        if key in (ord("i"), ord("I")) and state in ("IDLE", "STOP", "CRASH"):
+            print("[KEY] INIT pressed — starting initialization", flush=True)
             state           = "INIT"
             init_samples    = []
             init_start_time = time.perf_counter()
@@ -861,7 +886,8 @@ try:
             set_warning_output(False); set_brake_output(0.0)
             reset_ego(ego)
 
-        elif key == ord("r"):
+        elif key in (ord("r"), ord("R")):
+            print("[KEY] RESET pressed — returning to IDLE", flush=True)
             state           = "IDLE"
             init_samples    = []
             init_start_time = None
@@ -881,8 +907,8 @@ try:
             reset_ego(ego)
 
         elif USE_MANUAL_SPEED:
-            if   key == ord("w"): manual_speed_mps = min(manual_speed_mps + MANUAL_SPEED_STEP, MAX_DEMO_SPEED)
-            elif key == ord("s"): manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
+            if   key in (ord("w"), ord("W")): manual_speed_mps = min(manual_speed_mps + MANUAL_SPEED_STEP, MAX_DEMO_SPEED)
+            elif key in (ord("s"), ord("S")): manual_speed_mps = max(manual_speed_mps - MANUAL_SPEED_STEP, 0.0)
             elif key == ord(" "): manual_speed_mps = 0.0
 
         timings["key"] = time.perf_counter() - t0
