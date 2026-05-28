@@ -45,6 +45,7 @@ TV_MODE             = True   # HDMI TV mode for Sharp 2T-C42BE1 / 1080p
 SCREEN_W            = 1920   # Sharp 2T-C42BE1 Full HD width
 SCREEN_H            = 1080   # Sharp 2T-C42BE1 Full HD height
 # 1080p dashboard layout: camera + status on top, graph + ego animation below
+# Black-background presentation version with clickable EXIT button.
 DASHBOARD_MODE      = True
 TOP_H               = 700
 BOTTOM_H            = SCREEN_H - TOP_H
@@ -403,7 +404,7 @@ def first_state_idx(state_log, target):
             return i
     return None
 
-def _resize_letterbox(img, target_w, target_h, bg=(18, 18, 18)):
+def _resize_letterbox(img, target_w, target_h, bg=(0, 0, 0)):
     """Resize an image without distortion and pad it to the target size."""
     canvas = np.full((target_h, target_w, 3), bg, dtype=np.uint8)
     if img is None or img.size == 0:
@@ -440,8 +441,8 @@ def _draw_label_value(img, label, value, x, y, value_color=(255, 255, 255)):
 
 
 def _draw_status_panel(panel):
-    panel[:] = (24, 24, 24)
-    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+    panel[:] = (0, 0, 0)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (45, 45, 45), 1)
 
     st = globals().get("state", "IDLE")
     spd = float(globals().get("current_speed", 0.0) or 0.0)
@@ -473,7 +474,7 @@ def _draw_status_panel(panel):
     # Brake bar
     bx, by, bw, bh = 360, 260, 260, 42
     cv2.putText(panel, "Brake level", (bx, by - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (170, 170, 170), 1)
-    cv2.rectangle(panel, (bx, by), (bx + bw, by + bh), (100, 100, 100), 2)
+    cv2.rectangle(panel, (bx, by), (bx + bw, by + bh), (45, 45, 45), 1)
     fill_w = int(np.clip(blevel, 0.0, 1.0) * bw)
     cv2.rectangle(panel, (bx, by), (bx + fill_w, by + bh), col, -1)
     cv2.putText(panel, f"{blevel*100:.0f}%", (bx + 85, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
@@ -494,8 +495,8 @@ def _draw_status_panel(panel):
 
 def _draw_live_graph(panel):
     """Draw only Speed vs Time on the dashboard, with clear units."""
-    panel[:] = (18, 18, 18)
-    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+    panel[:] = (0, 0, 0)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (45, 45, 45), 1)
     cv2.putText(panel, "LIVE GRAPH: Speed vs Time", (30, 42),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2)
 
@@ -523,7 +524,7 @@ def _draw_live_graph(panel):
     # Plot area.
     x0, y0 = 90, 72
     x1, y1 = panel.shape[1] - 45, panel.shape[0] - 65
-    cv2.rectangle(panel, (x0, y0), (x1, y1), (80, 80, 80), 1)
+    cv2.rectangle(panel, (x0, y0), (x1, y1), (45, 45, 45), 1)
 
     # Dynamic vertical scale, but never lower than the demo maximum so the graph is stable.
     valid_speeds = [float(s) for s in speeds if s is not None and np.isfinite(s)]
@@ -578,8 +579,8 @@ def _draw_live_graph(panel):
 
 
 def _draw_ego_animation(panel):
-    panel[:] = (20, 20, 20)
-    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+    panel[:] = (0, 0, 0)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (45, 45, 45), 1)
     cv2.putText(panel, "EGO VEHICLE ANIMATION", (25, 42),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
@@ -590,7 +591,7 @@ def _draw_ego_animation(panel):
     brake = bool(globals().get("brake_on", False))
 
     road_y = panel.shape[0] // 2 + 45
-    cv2.rectangle(panel, (30, road_y - 55), (panel.shape[1] - 30, road_y + 55), (50, 50, 50), -1)
+    cv2.rectangle(panel, (30, road_y - 55), (panel.shape[1] - 30, road_y + 55), (18, 18, 18), -1)
     cv2.line(panel, (30, road_y), (panel.shape[1] - 30, road_y), (170, 170, 170), 2)
     for x in range(40, panel.shape[1] - 30, 80):
         cv2.line(panel, (x, road_y), (x + 35, road_y), (230, 230, 230), 2)
@@ -668,9 +669,9 @@ def _make_dashboard(cam_frame):
     dashboard[TOP_H:SCREEN_H, GRAPH_W:SCREEN_W] = ego_panel
 
     # separators
-    cv2.line(dashboard, (CAM_W, 0), (CAM_W, TOP_H), (100, 100, 100), 2)
-    cv2.line(dashboard, (0, TOP_H), (SCREEN_W, TOP_H), (100, 100, 100), 2)
-    cv2.line(dashboard, (GRAPH_W, TOP_H), (GRAPH_W, SCREEN_H), (100, 100, 100), 2)
+    cv2.line(dashboard, (CAM_W, 0), (CAM_W, TOP_H), (45, 45, 45), 1)
+    cv2.line(dashboard, (0, TOP_H), (SCREEN_W, TOP_H), (45, 45, 45), 1)
+    cv2.line(dashboard, (GRAPH_W, TOP_H), (GRAPH_W, SCREEN_H), (45, 45, 45), 1)
 
     # Draw this last so it stays clickable and visible above all panels.
     _draw_exit_button(dashboard)
