@@ -34,6 +34,7 @@ except Exception:
 DEBUG_TIMING        = True
 PRINT_EVERY_N_LOOPS = 150   # ~every 3 s at 50 Hz
 DISPLAY_EVERY_N     = 3     # ~17 FPS display at 50 Hz
+SHOW_MATPLOTLIB_PLOTS = False  # keep False for HDMI demo; plt.show() can block closing
 TV_MODE             = True   # HDMI TV fullscreen mode for Sharp 2T-C42BE1 / 1080p
 SCREEN_W            = 1920   # Sharp 2T-C42BE1 Full HD width
 SCREEN_H            = 1080   # Sharp 2T-C42BE1 Full HD height
@@ -674,7 +675,9 @@ def print_timing(label: str, timings: dict):
 # ============================================================
 def plot_results(time_log, distance_log, speed_log, ttc_log,
                  travel_log, stop_req_log, state_log):
-    if not time_log:
+    # Disabled during HDMI dashboard demo because matplotlib plt.show() can steal focus
+    # or block the OpenCV window, making it feel impossible to close.
+    if not SHOW_MATPLOTLIB_PLOTS or not time_log:
         return
 
     fcw_idx       = first_state_idx(state_log, "FCW")
@@ -813,7 +816,7 @@ try:
         # Keyboard input + display — throttled to ~17 FPS
         # ----------------------------------------------------
         t0  = time.perf_counter()
-        key = (cv2.waitKey(1) & 0xFF) if should_display else 0xFF
+        key = cv2.waitKey(1) & 0xFF  # always poll keyboard so q/ESC works even between display frames
 
         # Physical button events override the keyboard key for this tick
         if _btn1_event.is_set():
@@ -829,8 +832,15 @@ try:
             _btn3_event.clear()
             key = ord("r")
 
-        if key == ord("q"):
+        # Exit keys: q or ESC. Also exit if the user closes the OpenCV window.
+        if key in (ord("q"), 27):
             break
+        if TV_MODE:
+            try:
+                if cv2.getWindowProperty("AEB System", cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
+                break
 
         elif key == ord("i") and state in ("IDLE", "STOP", "CRASH"):
             state           = "INIT"
