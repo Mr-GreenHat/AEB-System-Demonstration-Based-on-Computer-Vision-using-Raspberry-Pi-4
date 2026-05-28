@@ -37,7 +37,16 @@ DISPLAY_EVERY_N     = 3     # ~17 FPS display at 50 Hz
 TV_MODE             = True   # HDMI TV fullscreen mode for Sharp 2T-C42BE1 / 1080p
 SCREEN_W            = 1920   # Sharp 2T-C42BE1 Full HD width
 SCREEN_H            = 1080   # Sharp 2T-C42BE1 Full HD height
-CAM_DISPLAY_H       = 760    # camera area height; remaining height is the 2D world
+# 1080p dashboard layout: camera + status on top, graph + ego animation below
+DASHBOARD_MODE      = True
+TOP_H               = 700
+BOTTOM_H            = SCREEN_H - TOP_H
+CAM_W               = 1240
+STATUS_W            = SCREEN_W - CAM_W
+GRAPH_W             = 1240
+EGO_W               = SCREEN_W - GRAPH_W
+GRAPH_HISTORY_SEC   = 12.0
+CAM_DISPLAY_H       = TOP_H   # kept for compatibility with old display path
 
 # ============================================================
 # Control loop rate  — decoupled from YOLO speed
@@ -379,30 +388,264 @@ def first_state_idx(state_log, target):
             return i
     return None
 
-def _show(cam_frame, world_img):
+def _resize_letterbox(img, target_w, target_h, bg=(18, 18, 18)):
+    """Resize an image without distortion and pad it to the target size."""
+    canvas = np.full((target_h, target_w, 3), bg, dtype=np.uint8)
+    if img is None or img.size == 0:
+        cv2.putText(canvas, "NO CAMERA FRAME", (40, target_h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (180, 180, 180), 2)
+        return canvas
+
+    h, w = img.shape[:2]
+    scale = min(target_w / max(w, 1), target_h / max(h, 1))
+    new_w = max(1, int(w * scale))
+    new_h = max(1, int(h * scale))
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    x0 = (target_w - new_w) // 2
+    y0 = (target_h - new_h) // 2
+    canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
+    return canvas
+
+
+def _status_color(s):
+    if s in ("CRASH", "CRASH_RISK", "EMERGENCY"):
+        return (40, 40, 230)
+    if s == "PARTIAL":
+        return (0, 180, 255)
+    if s == "FCW":
+        return (0, 230, 230)
+    if s == "STOP":
+        return (60, 220, 60)
+    return (80, 220, 80)
+
+
+def _draw_label_value(img, label, value, x, y, value_color=(255, 255, 255)):
+    cv2.putText(img, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (170, 170, 170), 1)
+    cv2.putText(img, value, (x, y + 38), cv2.FONT_HERSHEY_SIMPLEX, 1.05, value_color, 2)
+
+
+def _draw_status_panel(panel):
+    panel[:] = (24, 24, 24)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+
+    st = globals().get("state", "IDLE")
+    spd = float(globals().get("current_speed", 0.0) or 0.0)
+    dist = globals().get("virtual_distance", None)
+    live = globals().get("last_live_distance", None)
+    ttc_val = globals().get("ttc", math.inf)
+    brake = bool(globals().get("brake_on", False))
+    warn = bool(globals().get("warning_on", False))
+    blevel = float(globals().get("brake_level", 0.0) or 0.0)
+    override = bool(globals().get("manual_override", False))
+    d0 = globals().get("locked_initial_distance", None)
+
+    col = _status_color(st)
+    cv2.putText(panel, "AEB DEMO DASHBOARD", (30, 52), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (255, 255, 255), 2)
+    cv2.rectangle(panel, (30, 82), (panel.shape[1] - 30, 160), col, -1)
+    cv2.putText(panel, f"STATE: {st}", (50, 133), cv2.FONT_HERSHEY_SIMPLEX, 1.35, (0, 0, 0), 3)
+
+    ttc_text = f"{ttc_val:.2f} s" if math.isfinite(ttc_val) else "inf"
+    dist_text = f"{float(dist):.2f} m" if dist is not None else "n/a"
+    live_text = f"{float(live):.2f} m" if live is not None else "none"
+    d0_text = f"{float(d0):.2f} m" if d0 is not None else "not locked"
+
+    _draw_label_value(panel, "Speed", f"{spd:.2f} m/s  ({spd*3.6:.0f} km/h)", 35, 220)
+    _draw_label_value(panel, "Virtual distance", dist_text, 35, 315)
+    _draw_label_value(panel, "TTC", ttc_text, 35, 410, col)
+    _draw_label_value(panel, "Camera distance", live_text, 35, 505)
+    _draw_label_value(panel, "Initial lock", d0_text, 35, 600)
+
+    # Brake bar
+    bx, by, bw, bh = 360, 260, 260, 42
+    cv2.putText(panel, "Brake level", (bx, by - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (170, 170, 170), 1)
+    cv2.rectangle(panel, (bx, by), (bx + bw, by + bh), (100, 100, 100), 2)
+    fill_w = int(np.clip(blevel, 0.0, 1.0) * bw)
+    cv2.rectangle(panel, (bx, by), (bx + fill_w, by + bh), col, -1)
+    cv2.putText(panel, f"{blevel*100:.0f}%", (bx + 85, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+    warn_txt = "WARNING ON" if warn else "warning off"
+    brake_txt = "BRAKE ON" if brake else "brake off"
+    cv2.putText(panel, warn_txt, (360, 380), cv2.FONT_HERSHEY_SIMPLEX, 0.82,
+                (0, 230, 230) if warn else (120, 120, 120), 2)
+    cv2.putText(panel, brake_txt, (360, 430), cv2.FONT_HERSHEY_SIMPLEX, 0.82,
+                col if brake else (120, 120, 120), 2)
+    if override:
+        cv2.rectangle(panel, (350, 470), (panel.shape[1] - 35, 545), (0, 0, 230), -1)
+        cv2.putText(panel, "MANUAL OVERRIDE", (370, 518), cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2)
+
+    cv2.putText(panel, "Keys: I init/run   R reset   Q quit   W/S speed", (35, panel.shape[0] - 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
+
+
+def _draw_live_graph(panel):
+    panel[:] = (18, 18, 18)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+    cv2.putText(panel, "LIVE GRAPH: distance / speed / TTC", (30, 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2)
+
+    times = list(globals().get("time_log", []))
+    if len(times) < 2:
+        cv2.putText(panel, "Press I after camera detection to start logging", (35, panel.shape[0] // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (180, 180, 180), 2)
+        return
+
+    distances = list(globals().get("distance_log", []))
+    speeds = list(globals().get("speed_log", []))
+    ttcs = list(globals().get("ttc_log", []))
+
+    now = times[-1]
+    start = max(0.0, now - GRAPH_HISTORY_SEC)
+    idx0 = 0
+    for i, t in enumerate(times):
+        if t >= start:
+            idx0 = i
+            break
+    times = times[idx0:]
+    distances = distances[idx0:]
+    speeds = speeds[idx0:]
+    ttcs = ttcs[idx0:]
+
+    x0, y0 = 70, 72
+    x1, y1 = panel.shape[1] - 35, panel.shape[0] - 50
+    cv2.rectangle(panel, (x0, y0), (x1, y1), (80, 80, 80), 1)
+    for k in range(1, 5):
+        y = y0 + (y1 - y0) * k // 5
+        cv2.line(panel, (x0, y), (x1, y), (45, 45, 45), 1)
+    for k in range(1, 6):
+        x = x0 + (x1 - x0) * k // 6
+        cv2.line(panel, (x, y0), (x, y1), (45, 45, 45), 1)
+
+    def pts(series, scale_max):
+        out = []
+        t_min, t_max = times[0], max(times[-1], times[0] + 1e-6)
+        for t, v in zip(times, series):
+            if v is None or not np.isfinite(v):
+                continue
+            x = int(x0 + (t - t_min) / (t_max - t_min) * (x1 - x0))
+            y = int(y1 - np.clip(float(v) / max(scale_max, 1e-6), 0.0, 1.0) * (y1 - y0))
+            out.append((x, y))
+        return out
+
+    max_dist = max([d for d in distances if d is not None] + [5.0])
+    max_speed = max([s for s in speeds if s is not None] + [MAX_DEMO_SPEED, 1.0])
+    finite_ttc = [v for v in ttcs if v is not None and np.isfinite(v)]
+    max_ttc = max(finite_ttc + [SAFE_TTC, 1.0])
+
+    series_specs = [
+        (distances, max_dist, (80, 220, 255), "Distance"),
+        (speeds, max_speed, (80, 255, 80), "Speed"),
+        (ttcs, max_ttc, (255, 180, 80), "TTC"),
+    ]
+    legend_x = x0 + 20
+    for n, (series, scale, color, name) in enumerate(series_specs):
+        p = pts(series, scale)
+        if len(p) >= 2:
+            cv2.polylines(panel, [np.array(p, dtype=np.int32)], False, color, 2)
+        ly = 105 + 28 * n
+        cv2.line(panel, (legend_x, ly), (legend_x + 30, ly), color, 3)
+        cv2.putText(panel, name, (legend_x + 42, ly + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+
+    cv2.putText(panel, f"last {GRAPH_HISTORY_SEC:.0f}s", (x1 - 135, y1 + 33),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (170, 170, 170), 1)
+
+
+def _draw_ego_animation(panel):
+    panel[:] = (20, 20, 20)
+    cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
+    cv2.putText(panel, "EGO VEHICLE ANIMATION", (25, 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+    st = globals().get("state", "IDLE")
+    locked = globals().get("locked_initial_distance", None)
+    robot = float(globals().get("robot_z", 0.0) or 0.0)
+    dist = globals().get("virtual_distance", None)
+    brake = bool(globals().get("brake_on", False))
+
+    road_y = panel.shape[0] // 2 + 45
+    cv2.rectangle(panel, (30, road_y - 55), (panel.shape[1] - 30, road_y + 55), (50, 50, 50), -1)
+    cv2.line(panel, (30, road_y), (panel.shape[1] - 30, road_y), (170, 170, 170), 2)
+    for x in range(40, panel.shape[1] - 30, 80):
+        cv2.line(panel, (x, road_y), (x + 35, road_y), (230, 230, 230), 2)
+
+    span = max(float(locked) if locked else 5.0, 5.0)
+    left, right = 80, panel.shape[1] - 95
+    obj_x = right
+    car_x = int(left + np.clip(robot / span, 0.0, 1.0) * (right - left))
+
+    # obstacle
+    cv2.rectangle(panel, (obj_x - 8, road_y - 70), (obj_x + 30, road_y + 45), (0, 0, 220), -1)
+    cv2.putText(panel, "OBSTACLE", (obj_x - 75, road_y - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1)
+
+    # ego car body
+    car_color = _status_color(st)
+    cv2.rectangle(panel, (car_x - 50, road_y - 32), (car_x + 50, road_y + 28), car_color, -1)
+    cv2.rectangle(panel, (car_x - 22, road_y - 58), (car_x + 35, road_y - 28), (210, 210, 210), -1)
+    cv2.circle(panel, (car_x - 32, road_y + 32), 12, (10, 10, 10), -1)
+    cv2.circle(panel, (car_x + 35, road_y + 32), 12, (10, 10, 10), -1)
+    cv2.putText(panel, "EGO", (car_x - 28, road_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 2)
+
+    if brake:
+        cv2.putText(panel, "BRAKING", (car_x - 55, road_y + 82), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 230, 230), 2)
+        cv2.line(panel, (car_x - 60, road_y + 50), (car_x - 115, road_y + 50), (0, 230, 230), 3)
+        cv2.line(panel, (car_x - 55, road_y + 66), (car_x - 100, road_y + 66), (0, 230, 230), 2)
+
+    d_text = f"Remaining: {float(dist):.2f} m" if dist is not None else "Remaining: n/a"
+    cv2.putText(panel, d_text, (35, panel.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+    cv2.putText(panel, f"Travel: {robot:.2f} m", (35, panel.shape[0] - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (190, 190, 190), 1)
+
+
+def _make_dashboard(cam_frame):
+    dashboard = np.zeros((SCREEN_H, SCREEN_W, 3), dtype=np.uint8)
+
+    camera_panel = _resize_letterbox(cam_frame, CAM_W, TOP_H)
+    status_panel = np.zeros((TOP_H, STATUS_W, 3), dtype=np.uint8)
+    graph_panel = np.zeros((BOTTOM_H, GRAPH_W, 3), dtype=np.uint8)
+    ego_panel = np.zeros((BOTTOM_H, EGO_W, 3), dtype=np.uint8)
+
+    _draw_status_panel(status_panel)
+    _draw_live_graph(graph_panel)
+    _draw_ego_animation(ego_panel)
+
+    dashboard[0:TOP_H, 0:CAM_W] = camera_panel
+    dashboard[0:TOP_H, CAM_W:SCREEN_W] = status_panel
+    dashboard[TOP_H:SCREEN_H, 0:GRAPH_W] = graph_panel
+    dashboard[TOP_H:SCREEN_H, GRAPH_W:SCREEN_W] = ego_panel
+
+    # separators
+    cv2.line(dashboard, (CAM_W, 0), (CAM_W, TOP_H), (100, 100, 100), 2)
+    cv2.line(dashboard, (0, TOP_H), (SCREEN_W, TOP_H), (100, 100, 100), 2)
+    cv2.line(dashboard, (GRAPH_W, TOP_H), (GRAPH_W, SCREEN_H), (100, 100, 100), 2)
+    return dashboard
+
+
+def _show(cam_frame, world_img=None):
     """
     Display output.
 
-    TV_MODE=True creates one 1920x1080 fullscreen HDMI image for the
-    Sharp 2T-C42BE1. The camera view fills the top area and the 2D world
-    panel fills the bottom area.
+    TV_MODE=True + DASHBOARD_MODE=True creates one 1920x1080 fullscreen HDMI
+    dashboard for the Sharp 2T-C42BE1:
+      top-left: camera feedback
+      top-right: large status panel
+      bottom-left: moving live graph
+      bottom-right: moving ego-car animation
     """
     if TV_MODE:
-        # Guard against bad camera frames so one failed frame does not crash display.
-        if cam_frame is None or world_img is None:
+        if DASHBOARD_MODE:
+            cv2.imshow("AEB System", _make_dashboard(cam_frame))
             return
 
+        # Legacy TV layout: camera on top, world panel below.
+        if cam_frame is None or world_img is None:
+            return
         cam_h = int(np.clip(CAM_DISPLAY_H, 1, SCREEN_H - 1))
         world_h = SCREEN_H - cam_h
-
         cam_resized = cv2.resize(cam_frame, (SCREEN_W, cam_h), interpolation=cv2.INTER_LINEAR)
         world_resized = cv2.resize(world_img, (SCREEN_W, world_h), interpolation=cv2.INTER_LINEAR)
-
         combined = np.vstack([cam_resized, world_resized])
         cv2.imshow("AEB System", combined)
     else:
         cv2.imshow("CV + Tracking", cam_frame)
-        cv2.imshow("2D World",      world_img)
+        cv2.imshow("2D World", world_img)
 
 def _ms(s: float) -> float:
     return s * 1000.0
