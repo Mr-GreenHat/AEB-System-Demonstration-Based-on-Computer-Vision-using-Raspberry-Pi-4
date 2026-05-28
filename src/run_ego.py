@@ -478,21 +478,23 @@ def _draw_status_panel(panel):
 
 
 def _draw_live_graph(panel):
+    """Draw only Speed vs Time on the dashboard, with clear units."""
     panel[:] = (18, 18, 18)
     cv2.rectangle(panel, (0, 0), (panel.shape[1] - 1, panel.shape[0] - 1), (90, 90, 90), 2)
-    cv2.putText(panel, "LIVE GRAPH: distance / speed / TTC", (30, 42),
+    cv2.putText(panel, "LIVE GRAPH: Speed vs Time", (30, 42),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.95, (255, 255, 255), 2)
 
     times = list(globals().get("time_log", []))
-    if len(times) < 2:
+    speeds = list(globals().get("speed_log", []))
+
+    if len(times) < 2 or len(speeds) < 2:
         cv2.putText(panel, "Press I after camera detection to start logging", (35, panel.shape[0] // 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (180, 180, 180), 2)
+        cv2.putText(panel, "X-axis: Time (s)    Y-axis: Speed (m/s)", (35, panel.shape[0] // 2 + 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.72, (180, 180, 180), 2)
         return
 
-    distances = list(globals().get("distance_log", []))
-    speeds = list(globals().get("speed_log", []))
-    ttcs = list(globals().get("ttc_log", []))
-
+    # Keep only the latest GRAPH_HISTORY_SEC seconds for a moving graph.
     now = times[-1]
     start = max(0.0, now - GRAPH_HISTORY_SEC)
     idx0 = 0
@@ -501,51 +503,62 @@ def _draw_live_graph(panel):
             idx0 = i
             break
     times = times[idx0:]
-    distances = distances[idx0:]
     speeds = speeds[idx0:]
-    ttcs = ttcs[idx0:]
 
-    x0, y0 = 70, 72
-    x1, y1 = panel.shape[1] - 35, panel.shape[0] - 50
+    # Plot area.
+    x0, y0 = 90, 72
+    x1, y1 = panel.shape[1] - 45, panel.shape[0] - 65
     cv2.rectangle(panel, (x0, y0), (x1, y1), (80, 80, 80), 1)
-    for k in range(1, 5):
-        y = y0 + (y1 - y0) * k // 5
+
+    # Dynamic vertical scale, but never lower than the demo maximum so the graph is stable.
+    valid_speeds = [float(s) for s in speeds if s is not None and np.isfinite(s)]
+    max_speed = max(valid_speeds + [MAX_DEMO_SPEED, 1.0])
+    max_speed = math.ceil(max_speed * 1.15)
+    max_speed = max(max_speed, 1.0)
+
+    # Grid + Y-axis tick labels in m/s.
+    y_ticks = 5
+    for k in range(y_ticks + 1):
+        y = int(y1 - (y1 - y0) * k / y_ticks)
+        speed_val = max_speed * k / y_ticks
         cv2.line(panel, (x0, y), (x1, y), (45, 45, 45), 1)
-    for k in range(1, 6):
-        x = x0 + (x1 - x0) * k // 6
+        cv2.putText(panel, f"{speed_val:.1f}", (25, y + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 180, 180), 1)
+
+    # Grid + X-axis tick labels in seconds.
+    t_min, t_max = times[0], max(times[-1], times[0] + 1e-6)
+    x_ticks = 6
+    for k in range(x_ticks + 1):
+        x = int(x0 + (x1 - x0) * k / x_ticks)
+        t_val = t_min + (t_max - t_min) * k / x_ticks
         cv2.line(panel, (x, y0), (x, y1), (45, 45, 45), 1)
+        cv2.putText(panel, f"{t_val:.1f}", (x - 22, y1 + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 180, 180), 1)
 
-    def pts(series, scale_max):
-        out = []
-        t_min, t_max = times[0], max(times[-1], times[0] + 1e-6)
-        for t, v in zip(times, series):
-            if v is None or not np.isfinite(v):
-                continue
-            x = int(x0 + (t - t_min) / (t_max - t_min) * (x1 - x0))
-            y = int(y1 - np.clip(float(v) / max(scale_max, 1e-6), 0.0, 1.0) * (y1 - y0))
-            out.append((x, y))
-        return out
+    # Build Speed vs Time polyline.
+    pts = []
+    for t, v in zip(times, speeds):
+        if v is None or not np.isfinite(v):
+            continue
+        x = int(x0 + (float(t) - t_min) / (t_max - t_min) * (x1 - x0))
+        y = int(y1 - np.clip(float(v) / max_speed, 0.0, 1.0) * (y1 - y0))
+        pts.append((x, y))
 
-    max_dist = max([d for d in distances if d is not None] + [5.0])
-    max_speed = max([s for s in speeds if s is not None] + [MAX_DEMO_SPEED, 1.0])
-    finite_ttc = [v for v in ttcs if v is not None and np.isfinite(v)]
-    max_ttc = max(finite_ttc + [SAFE_TTC, 1.0])
+    if len(pts) >= 2:
+        cv2.polylines(panel, [np.array(pts, dtype=np.int32)], False, (80, 255, 80), 3)
 
-    series_specs = [
-        (distances, max_dist, (80, 220, 255), "Distance"),
-        (speeds, max_speed, (80, 255, 80), "Speed"),
-        (ttcs, max_ttc, (255, 180, 80), "TTC"),
-    ]
-    legend_x = x0 + 20
-    for n, (series, scale, color, name) in enumerate(series_specs):
-        p = pts(series, scale)
-        if len(p) >= 2:
-            cv2.polylines(panel, [np.array(p, dtype=np.int32)], False, color, 2)
-        ly = 105 + 28 * n
-        cv2.line(panel, (legend_x, ly), (legend_x + 30, ly), color, 3)
-        cv2.putText(panel, name, (legend_x + 42, ly + 7), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
+    # Current speed label.
+    current_spd = float(globals().get("current_speed", 0.0) or 0.0)
+    cv2.circle(panel, pts[-1], 5, (80, 255, 80), -1) if pts else None
+    cv2.putText(panel, f"Current speed: {current_spd:.2f} m/s  ({current_spd * 3.6:.1f} km/h)",
+                (x0 + 20, y0 + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (80, 255, 80), 2)
 
-    cv2.putText(panel, f"last {GRAPH_HISTORY_SEC:.0f}s", (x1 - 135, y1 + 33),
+    # Axis labels with units.
+    cv2.putText(panel, "Time (s)", ((x0 + x1) // 2 - 55, panel.shape[0] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (220, 220, 220), 2)
+    cv2.putText(panel, "Speed (m/s)", (x0 + 10, y0 - 18),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.62, (220, 220, 220), 2)
+    cv2.putText(panel, f"Showing last {GRAPH_HISTORY_SEC:.0f} s", (x1 - 185, y0 - 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (170, 170, 170), 1)
 
 
