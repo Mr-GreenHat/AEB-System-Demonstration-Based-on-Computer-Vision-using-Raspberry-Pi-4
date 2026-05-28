@@ -12,7 +12,7 @@ import threading
 import matplotlib.pyplot as plt
 
 from ego_sim import EgoVehicle
-from webcam_distance_test import main as vision_main
+from ipm.webcam_distance_test import main as vision_main
 
 # ============================================================
 # RPi GPIO — imported if available; stubs used on dev machine
@@ -621,6 +621,34 @@ def _draw_ego_animation(panel):
     cv2.putText(panel, d_text, (35, panel.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     cv2.putText(panel, f"Travel: {robot:.2f} m", (35, panel.shape[0] - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (190, 190, 190), 1)
 
+
+
+def _exit_button_rect():
+    x1 = SCREEN_W - EXIT_BUTTON_MARGIN - EXIT_BUTTON_W
+    y1 = EXIT_BUTTON_MARGIN
+    x2 = x1 + EXIT_BUTTON_W
+    y2 = y1 + EXIT_BUTTON_H
+    return x1, y1, x2, y2
+
+
+def _draw_exit_button(img):
+    x1, y1, x2, y2 = _exit_button_rect()
+    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 220), -1)
+    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 255), 2)
+    cv2.putText(img, "X", (x1 + 18, y1 + 45),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.35, (255, 255, 255), 3)
+    cv2.putText(img, "EXIT", (x1 + 62, y1 + 42),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+
+
+def _mouse_callback(event, x, y, flags, param):
+    global _exit_requested
+    if event != cv2.EVENT_LBUTTONDOWN:
+        return
+    x1, y1, x2, y2 = _exit_button_rect()
+    if x1 <= x <= x2 and y1 <= y <= y2:
+        print("[MOUSE] EXIT button clicked — quitting", flush=True)
+        _exit_requested = True
 
 def _make_dashboard(cam_frame):
     dashboard = np.zeros((SCREEN_H, SCREEN_W, 3), dtype=np.uint8)
