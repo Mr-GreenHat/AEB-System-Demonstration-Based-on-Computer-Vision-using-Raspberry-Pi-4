@@ -27,15 +27,16 @@ import onnxruntime as ort
 # Config
 # -----------------------------
 CONFIG = {
-    "onnx": r"C:\Users\adjip\Documents\python\ASO-IPM\yolov8n_int8_static_safe.onnx",
-    "names": r"C:\Users\adjip\Documents\python\ASO-IPM\src\coco.names",
+    "ncnn_param": r"/home/adji/ttc_project/yolov8n_ncnn_model/model.ncnn.param",
+    "ncnn_bin":   r"/home/adji/ttc_project/yolov8n_ncnn_model/model.ncnn.bin",
+    "names": r"/home/adji/ttc_project/coco.names",
 }
 
 CAMERA_INDEX = 1
 FRAME_W = 640
 FRAME_H = 480
 
-YOLO_INPUT_SIZE = 480
+YOLO_INPUT_SIZE = 320
 
 DETECTION_INTERVAL = 1
 MAX_MISSED_FRAMES = 8
@@ -624,6 +625,95 @@ class Track:
             print("Depth error:", e)
 
 
+# -----------------------------
+# YOLOv8 NCNN Detector
+# -----------------------------
+class YOLOv8NCNN:
+    def __init__(self, param_path, bin_path, class_names,
+                 conf_thres=YOLO_CONF_THRES, iou_thres=YOLO_IOU_THRES, input_size=320):
+        import ncnn
+        self._ncnn = ncnn
+        self.class_names = class_names
+        self.conf_thres = conf_thres
+        self.iou_thres = iou_thres
+        self.input_size = input_size
+
+        self.net = ncnn.Net()
+        self.net.opt.num_threads = 4
+        self.net.opt.use_vulkan_compute = False
+        self.net.load_param(param_path)
+        self.net.load_model(bin_path)
+
+    def detect(self, frame, target_classes=None):
+        h_orig, w_orig = frame.shape[:2]
+        s = self.input_size
+
+        img, gain, pad = letterbox(frame, new_shape=(s, s), scaleup=False)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        mat_in = self._ncnn.Mat.from_pixels(img_rgb, self._ncnn.Mat.PixelType.PIXEL_RGB, s, s)
+        mat_in.substract_mean_normalize([0, 0, 0], [1/255.0, 1/255.0, 1/255.0])
+
+        ex = self.net.create_extractor()
+        ex.input("in0", mat_in)
+        _, out = ex.extract("out0")
+
+        out = np.array(out)           # [84, 2100]
+        boxes_xywh = out[:4].T        # [2100, 4]
+        scores = out[4:].T            # [2100, 80]
+
+        class_ids = scores.argmax(axis=1).astype(np.int32)
+        confs = scores[np.arange(len(scores)), class_ids].astype(np.float32)
+
+        keep = confs >= self.conf_thres
+        boxes_xywh = boxes_xywh[keep]
+        class_ids = class_ids[keep]
+        confs = confs[keep]
+
+        if len(boxes_xywh) == 0:
+            return []
+
+        boxes_xyxy = xywh2xyxy(boxes_xywh)
+        boxes_xyxy[:, [0, 2]] -= pad[0]
+        boxes_xyxy[:, [1, 3]] -= pad[1]
+        boxes_xyxy[:, :4] /= gain
+        boxes_xyxy = clip_boxes_xyxy(boxes_xyxy, w_orig, h_orig)
+
+        if target_classes is not None:
+            mask = np.array([cid in target_classes for cid in class_ids], dtype=bool)
+            boxes_xyxy = boxes_xyxy[mask]
+            class_ids = class_ids[mask]
+            confs = confs[mask]
+
+        if len(boxes_xyxy) == 0:
+            return []
+
+        detections = []
+        for cid in np.unique(class_ids):
+            m = class_ids == cid
+            cls_boxes = boxes_xyxy[m]
+            cls_confs = confs[m]
+            keep_idx = nms_numpy(cls_boxes, cls_confs, self.iou_thres)
+            for k in keep_idx:
+                x1, y1, x2, y2 = cls_boxes[k].astype(int)
+                x1 = max(0, min(w_orig - 1, x1))
+                y1 = max(0, min(h_orig - 1, y1))
+                x2 = max(0, min(w_orig - 1, x2))
+                y2 = max(0, min(h_orig - 1, y2))
+                if x2 <= x1: x2 = min(w_orig - 1, x1 + 1)
+                if y2 <= y1: y2 = min(h_orig - 1, y1 + 1)
+                detections.append({
+                    "bbox": (int(x1), int(y1), int(x2 - x1), int(y2 - y1)),
+                    "center_u": float((x1 + x2) * 0.5),
+                    "bottom_v": float(y2),
+                    "world_xy": None,
+                    "class_name": self.class_names[cid] if 0 <= cid < len(self.class_names) else str(cid),
+                    "class_id": int(cid),
+                    "conf": float(cls_confs[k]),
+                })
+        return detections
+
+
 class Tracker:
     def __init__(self, max_missed=MAX_MISSED_FRAMES, match_iou=MATCH_IOU_THRESH):
         self.tracks = {}
@@ -750,8 +840,9 @@ def main(yield_every_frame=False):
     with open(CONFIG["names"], "r", encoding="utf-8") as f:
         classes = [line.strip() for line in f]
 
-    detector = YOLOv8ONNX(
-        CONFIG["onnx"],
+    detector = YOLOv8NCNN(
+        CONFIG["ncnn_param"],
+        CONFIG["ncnn_bin"],
         class_names=classes,
         conf_thres=YOLO_CONF_THRES,
         iou_thres=YOLO_IOU_THRES,
